@@ -223,7 +223,7 @@ int main(int argc, char *argv[])
 		r = parse_uuid(uuid_str, uuid);
 		if (!r) {
 			if (!be_sarcastic)
-				printf("Error parsing UUID '%s'\n", optarg);
+				printf("Error parsing UUID '%s'\n", uuid_str);
 			else
 				printf("UUID's fucked mate. Did an upright duck tell you to type that?\n");
 			return 1;
@@ -232,7 +232,12 @@ int main(int argc, char *argv[])
 
 		if (!addr_set) {
 			random = fopen("/dev/urandom", "r");
-			fread(bd_addr, 6, 1, random);
+			if (random == NULL || fread(bd_addr, 6, 1, random) != 1) {
+				perror("/dev/urandom");
+				if (random)
+					fclose(random);
+				return 1;
+			}
 			fclose(random);
 		}
 

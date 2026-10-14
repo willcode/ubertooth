@@ -19,9 +19,29 @@
  * Boston, MA 02110-1301, USA.
  */
 
+#include <stdlib.h>
 #include <string.h>
 #include <btbb.h>
 #include "ubertooth_control.h"
+
+#ifdef HAVE_LIBHACKRF
+#include "ubertooth_hackrf.h"
+
+/*
+ * With the HackRF backend open there is no USB handle (devh is NULL):
+ * requests go to the virtual Ubertooth instead.
+ */
+static int ut_control_transfer(struct libusb_device_handle* devh, uint8_t request_type,
+                               uint8_t request, uint16_t value, uint16_t index,
+                               unsigned char* data, uint16_t length, unsigned int timeout)
+{
+	if (devh == NULL && ubertooth_hackrf_active())
+		return ubertooth_hackrf_control(request_type, request, value, index, data, length);
+	return libusb_control_transfer(devh, request_type, request, value, index, data,
+	                               length, timeout);
+}
+#define libusb_control_transfer ut_control_transfer
+#endif
 
 #define CTRL_IN     (LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_IN)
 #define CTRL_OUT    (LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_ENDPOINT_OUT)
@@ -61,11 +81,37 @@ void show_libusb_error(int error_code)
 	fprintf(stderr,"libUSB Error: %s: %s (%d)\n", error_name, error_hint, error_code);
 }
 
+const char* ubertooth_transfer_status_str(int status)
+{
+	switch (status) {
+		case LIBUSB_TRANSFER_COMPLETED:
+			return "Transfer completed.";
+		case LIBUSB_TRANSFER_ERROR:
+			return "Transfer error.";
+		case LIBUSB_TRANSFER_TIMED_OUT:
+			return "Transfer timed out.";
+		case LIBUSB_TRANSFER_CANCELLED:
+			return "Transfer canceled.";
+		case LIBUSB_TRANSFER_STALL:
+			return "Halt condition detected, or control request not supported.";
+		case LIBUSB_TRANSFER_NO_DEVICE:
+			return "Device disconnected.";
+		case LIBUSB_TRANSFER_OVERFLOW:
+			return "Device sent more data than requested.";
+		default:
+			return "Unknown transfer status.";
+	}
+}
+
+/* completion of an asynchronous control request (ubertooth_cmd_async) */
 static void callback(struct libusb_transfer* transfer)
 {
-	if(transfer->status != 0) {
-		show_libusb_error(transfer->status);
+	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
+		fprintf(stderr, "control request %u failed: %s\n",
+		        libusb_control_transfer_get_setup(transfer)->bRequest,
+		        ubertooth_transfer_status_str(transfer->status));
 	}
+	/* LIBUSB_TRANSFER_FREE_BUFFER is set: frees the setup+data buffer too */
 	libusb_free_transfer(transfer);
 }
 
@@ -315,6 +361,10 @@ int cmd_get_serial(struct libusb_device_handle* devh, u8 *serial)
 		show_libusb_error(r);
 		return r;
 	}
+	if (r < 17) {
+		fprintf(stderr, "short serial number response (%d bytes)\n", r);
+		return 1;
+	}
 	if (serial[0] != 0) {
 		fprintf(stderr, "result not zero: %d\n", serial[0]);
 		return 1;
@@ -541,27 +591,32 @@ void cmd_get_rev_num(struct libusb_device_handle* devh, char *version, u8 len)
 	u8 result[2 + 1 + 255];
 	u16 result_ver;
 	int r;
+
+	if (version == NULL || len == 0)
+		return;
 	r = libusb_control_transfer(devh, CTRL_IN, UBERTOOTH_GET_REV_NUM, 0, 0,
 			result, sizeof(result), 1000);
 	if (r == LIBUSB_ERROR_PIPE) {
 		fprintf(stderr, "control message unsupported\n");
-		snprintf(version, len - 1, "error: %d", r);
-		version[len-1] = '\0';
+		snprintf(version, len, "error: %d", r);
 		return;
 	} else if (r < 0) {
 		show_libusb_error(r);
-		snprintf(version, len - 1, "error: %d", r);
-		version[len-1] = '\0';
+		snprintf(version, len, "error: %d", r);
 		return;
 	}
 
+	if (r < 2) {
+		snprintf(version, len, "unknown");
+		return;
+	}
 	result_ver = result[0] | (result[1] << 8);
 	if (r == 2) { // old-style SVN rev
-		sprintf(version, "%u", result_ver);
+		snprintf(version, len, "%u", result_ver);
 	} else {
-		len = MIN(r - 3, MIN(len - 1, result[2]));
-		memcpy(version, &result[3], len);
-		version[len] = '\0';
+		int n = MIN(r - 3, MIN((int)len - 1, (int)result[2]));
+		memcpy(version, &result[3], n);
+		version[n] = '\0';
 	}
 }
 
@@ -569,23 +624,28 @@ void cmd_get_compile_info(struct libusb_device_handle* devh, char *compile_info,
 {
 	u8 result[1 + 255];
 	int r;
+
+	if (compile_info == NULL || len == 0)
+		return;
 	r = libusb_control_transfer(devh, CTRL_IN, UBERTOOTH_GET_COMPILE_INFO, 0, 0,
 			result, sizeof(result), 1000);
 	if (r == LIBUSB_ERROR_PIPE) {
 		fprintf(stderr, "control message unsupported\n");
-		snprintf(compile_info, len - 1, "error: %d", r);
-		compile_info[len-1] = '\0';
+		snprintf(compile_info, len, "error: %d", r);
 		return;
 	} else if (r < 0) {
 		show_libusb_error(r);
-		snprintf(compile_info, len - 1, "error: %d", r);
-		compile_info[len-1] = '\0';
+		snprintf(compile_info, len, "error: %d", r);
 		return;
 	}
 
-	len = MIN(r - 1, MIN(len - 1, result[0]));
-	memcpy(compile_info, &result[1], len);
-	compile_info[len] = '\0';
+	if (r < 1) {
+		snprintf(compile_info, len, "unknown");
+		return;
+	}
+	int n = MIN(r - 1, MIN((int)len - 1, (int)result[0]));
+	memcpy(compile_info, &result[1], n);
+	compile_info[n] = '\0';
 }
 
 int cmd_get_board_id(struct libusb_device_handle* devh)
@@ -715,9 +775,10 @@ uint32_t cmd_get_clock(struct libusb_device_handle* devh)
 
 	r = libusb_control_transfer(devh, CTRL_IN, UBERTOOTH_GET_CLOCK, 0, 0,
 			data, 4, 3000);
-	if (r < 0) {
-		show_libusb_error(r);
-		return r;
+	if (r < 4) {
+		if (r < 0)
+			show_libusb_error(r);
+		return 0;
 	}
 	clock = data[0] | data[1] << 8 | data[2] << 16 | data[3] << 24;
 	printf("Read clock = 0x%x\n", clock);
@@ -743,15 +804,7 @@ int cmd_btle_sniffing(struct libusb_device_handle* devh, uint8_t do_follow)
 
 int cmd_set_afh_map(struct libusb_device_handle* devh, uint8_t* afh_map)
 {
-	uint8_t buffer[LIBUSB_CONTROL_SETUP_SIZE+10];
-	struct libusb_transfer *xfer = libusb_alloc_transfer(0);
-
-	libusb_fill_control_setup(buffer, CTRL_OUT, UBERTOOTH_SET_AFHMAP, 0, 0, 10);
-	memcpy ( &buffer[LIBUSB_CONTROL_SETUP_SIZE], afh_map, 10 );
-	libusb_fill_control_transfer(xfer, devh, buffer, callback, NULL, 1000);
-	libusb_submit_transfer(xfer);
-
-	return 0;
+	return ubertooth_cmd_async(devh, CTRL_OUT, UBERTOOTH_SET_AFHMAP, afh_map, 10);
 }
 
 int cmd_clear_afh_map(struct libusb_device_handle* devh)
@@ -778,9 +831,10 @@ u32 cmd_get_access_address(struct libusb_device_handle* devh)
 
 	r = libusb_control_transfer(devh, CTRL_IN, UBERTOOTH_GET_ACCESS_ADDRESS, 0, 0,
 			data, 4, 3000);
-	if (r < 0) {
-		show_libusb_error(r);
-		return r;
+	if (r < 4) {
+		if (r < 0)
+			show_libusb_error(r);
+		return 0;
 	}
 	access_address = data[0] | data[1] << 8 | data[2] << 16 | data[3] << 24;
 	return access_address;
@@ -1033,26 +1087,12 @@ int cmd_afh(struct libusb_device_handle* devh)
 
 int cmd_hop(struct libusb_device_handle* devh)
 {
-	uint8_t buffer[LIBUSB_CONTROL_SETUP_SIZE];
-	struct libusb_transfer *xfer = libusb_alloc_transfer(0);
-
-	libusb_fill_control_setup(buffer, CTRL_OUT, UBERTOOTH_HOP, 0, 0, 0);
-	libusb_fill_control_transfer(xfer, devh, buffer, callback, NULL, 1000);
-	libusb_submit_transfer(xfer);
-
-	return 0;
+	return ubertooth_cmd_async(devh, CTRL_OUT, UBERTOOTH_HOP, NULL, 0);
 }
 
 int cmd_cancel_follow(struct libusb_device_handle* devh)
 {
-	uint8_t buffer[LIBUSB_CONTROL_SETUP_SIZE];
-	struct libusb_transfer *xfer = libusb_alloc_transfer(0);
-
-	libusb_fill_control_setup(buffer, CTRL_OUT, UBERTOOTH_CANCEL_FOLLOW, 0, 0, 0);
-	libusb_fill_control_transfer(xfer, devh, buffer, callback, NULL, 1000);
-	libusb_submit_transfer(xfer);
-
-	return 0;
+	return ubertooth_cmd_async(devh, CTRL_OUT, UBERTOOTH_CANCEL_FOLLOW, NULL, 0);
 }
 
 int cmd_rfcat_subcmd(struct libusb_device_handle* devh, int cmd, uint8_t *body, size_t body_len) {
@@ -1111,26 +1151,119 @@ int ubertooth_cmd_sync(struct libusb_device_handle* devh,
 	return 0;
 }
 
+/*
+ * Submit a vendor request without waiting for it. The request completes
+ * (and is freed) whenever libusb events are handled: by the bulk event
+ * thread while streaming, or by the next synchronous request.
+ */
 int ubertooth_cmd_async(struct libusb_device_handle* devh,
                         uint8_t type,
                         uint8_t command,
                         uint8_t* data,
                         uint16_t size)
 {
-	int r = 0;
+	int r;
+	uint8_t* buffer;
+	struct libusb_transfer* xfer;
 
-	uint8_t buffer[LIBUSB_CONTROL_SETUP_SIZE + size];
-	struct libusb_transfer* xfer = libusb_alloc_transfer(0);
+#ifdef HAVE_LIBHACKRF
+	if (devh == NULL && ubertooth_hackrf_active())
+		return ubertooth_hackrf_control(type, command, 0, 0, data, size) < 0 ? -1 : 0;
+#endif
+	/* the buffer must outlive this function: heap, freed by libusb */
+	buffer = malloc(LIBUSB_CONTROL_SETUP_SIZE + size);
+	xfer = libusb_alloc_transfer(0);
+	if (buffer == NULL || xfer == NULL) {
+		free(buffer);
+		libusb_free_transfer(xfer);
+		return LIBUSB_ERROR_NO_MEM;
+	}
 
 	libusb_fill_control_setup(buffer, type, command, 0, 0, size);
-	if(size > 0)
-		memcpy ( &buffer[LIBUSB_CONTROL_SETUP_SIZE], data, size );
+	if (size > 0)
+		memcpy(&buffer[LIBUSB_CONTROL_SETUP_SIZE], data, size);
 	libusb_fill_control_transfer(xfer, devh, buffer, callback, NULL, 1000);
-	xfer->status = LIBUSB_TRANSFER_FREE_BUFFER | LIBUSB_TRANSFER_FREE_TRANSFER;
-	r = libusb_submit_transfer(xfer);
+	/* callback() calls libusb_free_transfer(), which then frees buffer */
+	xfer->flags = LIBUSB_TRANSFER_FREE_BUFFER;
 
-	if (r < 0)
+	r = libusb_submit_transfer(xfer);
+	if (r < 0) {
 		show_libusb_error(r);
+		libusb_free_transfer(xfer);
+	}
 
 	return r;
+}
+
+static int vendor_out(struct libusb_device_handle* devh, uint8_t command,
+                      uint16_t value, uint16_t index,
+                      uint8_t* data, uint16_t size)
+{
+	int r = libusb_control_transfer(devh, CTRL_OUT, command, value, index,
+	                                data, size, 1000);
+	if (r < 0) {
+		if (r == LIBUSB_ERROR_PIPE)
+			fprintf(stderr, "control message %u unsupported\n", command);
+		else
+			show_libusb_error(r);
+		return r;
+	}
+	if (r < size) {
+		fprintf(stderr, "Only %d of %u bytes transferred\n", r, size);
+		return LIBUSB_ERROR_IO;
+	}
+	return 0;
+}
+
+static void put_le16(uint8_t* p, uint16_t v)
+{
+	p[0] = v & 0xff;
+	p[1] = (v >> 8) & 0xff;
+}
+
+static void put_le32(uint8_t* p, uint32_t v)
+{
+	put_le16(p, v & 0xffff);
+	put_le16(p + 2, v >> 16);
+}
+
+int cmd_le_monitor(struct libusb_device_handle* devh, uint16_t channel_mhz, uint32_t aa)
+{
+	uint8_t data[4];
+
+	put_le32(data, aa);
+	return vendor_out(devh, UBERTOOTH_LE_MONITOR, channel_mhz, 0, data, sizeof(data));
+}
+
+int cmd_le_follow_params(struct libusb_device_handle* devh, const le_follow_params_t* p)
+{
+	/* serialize explicitly so the wire format is little endian and
+	 * packed regardless of the host */
+	uint8_t data[sizeof(le_follow_params_t)];
+	uint8_t* q = data;
+
+	put_le32(q, p->access_address); q += 4;
+	put_le32(q, p->crc_init);       q += 4;
+	put_le32(q, p->anchor);         q += 4;
+	put_le16(q, p->counter);        q += 2;
+	put_le16(q, p->interval);       q += 2;
+	put_le16(q, p->timeout);        q += 2;
+	memcpy(q, p->chm, 5);           q += 5;
+	*q++ = p->hop;
+	*q++ = p->csa;
+	*q++ = p->unmapped;
+	*q++ = p->flags;
+	*q++ = p->sca;
+
+	return vendor_out(devh, UBERTOOTH_LE_FOLLOW_PARAMS, 0, 0, data, (uint16_t)(q - data));
+}
+
+int cmd_le_adv_config(struct libusb_device_handle* devh, uint16_t flags, uint16_t dwell_ms)
+{
+	return vendor_out(devh, UBERTOOTH_LE_ADV_CONFIG, flags, dwell_ms, NULL, 0);
+}
+
+int cmd_le_promisc_config(struct libusb_device_handle* devh, int8_t min_rssi, uint16_t flags)
+{
+	return vendor_out(devh, UBERTOOTH_LE_PROMISC_CONFIG, (uint8_t)min_rssi, flags, NULL, 0);
 }

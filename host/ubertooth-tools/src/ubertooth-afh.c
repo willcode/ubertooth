@@ -127,14 +127,16 @@ int main(int argc, char* argv[])
 	}
 
 	ut = ubertooth_start(ubertooth_device);
-	if (ut->devh == NULL) {
+	if (ut == NULL) {
 		usage();
 		return 1;
 	}
 
 	r = ubertooth_check_api(ut);
-	if (r < 0)
+	if (r < 0) {
+		ubertooth_free(ut);
 		return 1;
+	}
 
 	/* Clean up on exit. */
 	register_cleanup_handler(ut, 0);
@@ -144,7 +146,7 @@ int main(int argc, char* argv[])
 	else
 		rx_afh(ut, pn, timeout);
 
-	ubertooth_stop(ut);
+	ubertooth_free(ut);
 
 	return 0;
 }

@@ -44,15 +44,23 @@ static void usage()
     printf("\t-v<0-2> verbosity (default=1)\n");
 }
 
+/* parse a "%NAME" token at the start of t, which may be followed by
+ * ',' or '-' and further list items */
 int token_to_int(char *t, int *size)
 {
-    int r = 0;
+    char name[32];
+    size_t len = strcspn(t, ",-");
+    int r;
 
-    r = cc2400_name2reg(t);
-    if (r >= 0)
-	*size = strlen(cc2400_reg2name(r));
-    else
+    if (len >= sizeof(name)) {
 	*size = -1;
+	return -1;
+    }
+    memcpy(name, t, len);
+    name[len] = '\0';
+
+    r = cc2400_name2reg(name);
+    *size = (r >= 0) ? (int)len : -1;
 
     return r;
 }

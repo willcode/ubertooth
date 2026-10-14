@@ -83,7 +83,7 @@ def main():
             assert False, "unhandled option"
 
     # every operation down here depends on having an interface
-    m = re.match('ubertooth(\d+)', interface)
+    m = re.match(r'ubertooth(\d+)', interface)
     if not m:
         exit(1)
     interface = m.group(1)

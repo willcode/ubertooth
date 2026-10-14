@@ -25,11 +25,15 @@
 #include <unistd.h>
 #include <stdlib.h>
 
+/* -a with no level reads it; 0 is a valid level to set */
+#define PALEVEL_GET (-2)
+
 const char* board_names[] = {
 	"Ubertooth Zero",
 	"Ubertooth One",
 	"ToorCon 13 Badge"
 };
+#define NUM_BOARD_NAMES (sizeof(board_names) / sizeof(board_names[0]))
 
 static void usage(FILE *output)
 {
@@ -44,7 +48,8 @@ static void usage(FILE *output)
 	fprintf(output, "\t-S stop current operation\n");
 	fprintf(output, "\t-r full reset\n");
 	fprintf(output, "\t-U<0-7> set ubertooth device to use\n");
-	fprintf(output, "\t-N print total number of Uberteeth and exit\n");
+	fprintf(output, "\t-N print total number of devices (Ubertooths, HackRF Pros) and exit\n");
+	fprintf(output, "\t-L list the devices with their -U numbers and exit\n");
 	fprintf(output, "\n");
 	fprintf(output, "Radio options:\n");
 	fprintf(output, "\t-a[0-7] get/set power amplifier level\n");
@@ -82,7 +87,7 @@ int main(int argc, char *argv[])
 	int do_range_result, do_all_leds, do_identify;
 	int do_set_squelch, do_get_squelch, squelch_level;
 	int do_something, do_compile_info;
-	int do_number, do_xmas;
+	int do_number, do_xmas, do_list = 0;
 	int ubertooth_device = -1;
 	char version_string[MAX_VERSION_STRING_LEN];
 
@@ -97,7 +102,7 @@ int main(int argc, char *argv[])
 	do_something= 0; do_compile_info= -1;
 	do_number= 0; do_xmas= 0;
 
-	while ((opt=getopt(argc,argv,"U:hnmefiIprsStvbl::a::C::c::d::q::z::9VNx")) != EOF) {
+	while ((opt=getopt(argc,argv,"U:hnmefiIprsStvbl::a::C::c::d::q::z::9VNLx")) != EOF) {
 		switch(opt) {
 		case 'U':
 			ubertooth_device = atoi(optarg);
@@ -143,7 +148,7 @@ int main(int argc, char *argv[])
 			if (optarg)
 				do_palevel= atoi(optarg);
 			else
-				do_palevel= 0;
+				do_palevel= PALEVEL_GET;
 			break;
 		case 'C':
 			if (optarg)
@@ -196,6 +201,9 @@ int main(int argc, char *argv[])
 		case 'N':
 			do_number = 1;
 			break;
+		case 'L':
+			do_list = 1;
+			break;
 		case 'x':
 			do_xmas = 1;
 			break;
@@ -208,9 +216,16 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	if (do_list)
+		return ubertooth_list_devices(stdout) < 0;
+
 	if (do_number) {
-		unsigned count = ubertooth_count();
-		printf("%u\n", count);
+		int count = ubertooth_count();
+		if (count < 0) {
+			fprintf(stderr, "could not count Ubertooth devices\n");
+			return 1;
+		}
+		printf("%d\n", count);
 		return 0;
 	}
 
@@ -223,8 +238,18 @@ int main(int argc, char *argv[])
 	if(do_reset == 0) {
 		fprintf(stdout, "Resetting ubertooth device number %d\n", (ubertooth_device >= 0) ? ubertooth_device : 0);
 		r = cmd_reset(ut->devh);
-		sleep(2);
-		ut = ubertooth_start(ubertooth_device);
+		ubertooth_stop(ut);
+		ubertooth_free(ut);
+		/* wait for the device to re-enumerate */
+		ut = NULL;
+		for (int tries = 0; tries < 10 && ut == NULL; ++tries) {
+			sleep(1);
+			ut = ubertooth_start(ubertooth_device);
+		}
+		if (ut == NULL) {
+			fprintf(stderr, "device did not come back after reset\n");
+			return 1;
+		}
 	}
 	if(do_stop == 0) {
 		fprintf(stdout, "Stopping ubertooth device number %d\n", (ubertooth_device >= 0) ? ubertooth_device : 0);
@@ -242,7 +267,7 @@ int main(int argc, char *argv[])
 		r= cmd_set_channel(ut->devh, do_channel);
 	if(do_leds == 0 || do_leds == 1)
 		r= cmd_set_usrled(ut->devh, do_leds);
-	if(do_palevel > 0)
+	if(do_palevel >= 0)
 		r= cmd_set_palevel(ut->devh, do_palevel);
 
 	/* reporting actions */
@@ -254,7 +279,8 @@ int main(int argc, char *argv[])
 	}
 	if(do_board_id == 0) {
 		r= cmd_get_board_id(ut->devh);
-		fprintf(stdout, "Board ID Number: %d (%s)\n", r, board_names[r]);
+		fprintf(stdout, "Board ID Number: %d (%s)\n", r,
+		        (r >= 0 && (unsigned)r < NUM_BOARD_NAMES) ? board_names[r] : "unknown");
 	}
 	if(do_channel == 0) {
 		r= cmd_get_channel(ut->devh);
@@ -277,7 +303,7 @@ int main(int argc, char *argv[])
 	}
 	if(do_leds == 2)
 		fprintf(stdout, "USR LED status: %d\n", r= cmd_get_usrled(ut->devh));
-	if(do_palevel == 0)
+	if(do_palevel == PALEVEL_GET)
 		fprintf(stdout, "PA Level: %d\n", r= cmd_get_palevel(ut->devh));
 	if(do_part == 0) {
 		fprintf(stdout, "Part ID: %X\n", r = cmd_get_partnum(ut->devh));

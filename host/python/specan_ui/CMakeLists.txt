@@ -23,6 +23,14 @@ set(DEPS        ${CMAKE_CURRENT_SOURCE_DIR}/specan/__init__.py
                 ${CMAKE_CURRENT_SOURCE_DIR}/specan/Ubertooth.py)
 set(OUTPUT      ${CMAKE_CURRENT_BINARY_DIR}/build)
 
+# setuptools needs a PEP 440 version
+if(NOT PACKAGE_VERSION)
+	if(VERSION)
+		set(PACKAGE_VERSION ${VERSION})
+	else()
+		set(PACKAGE_VERSION 1.1)
+	endif()
+endif()
 configure_file(${SETUP_PY_IN} ${SETUP_PY})
 
 add_custom_command(OUTPUT ${OUTPUT}/timestamp
@@ -31,7 +39,7 @@ add_custom_command(OUTPUT ${OUTPUT}/timestamp
                    DEPENDS ${DEPS})
 
 add_custom_target(specan ALL DEPENDS ${OUTPUT}/timestamp)
-install(CODE "execute_process(COMMAND ${Python3_EXECUTABLE} ${SETUP_PY} build -b ${OUTPUT} install)")
+install(CODE "execute_process(COMMAND ${Python3_EXECUTABLE} ${SETUP_PY} build -b ${OUTPUT} install -f --prefix=${CMAKE_INSTALL_PREFIX})")
 
 add_custom_target(ubertooth-specan-ui ALL DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth-specan-ui)
 install(PROGRAMS ubertooth-specan-ui DESTINATION ${INSTALL_DEFAULT_BINDIR})

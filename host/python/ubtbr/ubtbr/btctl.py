@@ -521,7 +521,7 @@ class BTCtlSuperCmd(Thread):
 		self._stopped.set()
 
 	def stopped(self):
-		return self._stopped.isSet()
+		return self._stopped.is_set()
 
 	def run(self):
 		while not self.stopped():
@@ -790,7 +790,7 @@ class BTCtl:
 		msg = None
 		msg_size = 0
 		log.info("Rx thread started")
-		while not self._rx_stopped.isSet():
+		while not self._rx_stopped.is_set():
 			try:
 				data = self._usb.bulkRead(self.DATA_IN, 64,100)
 			except usb1.USBErrorTimeout:

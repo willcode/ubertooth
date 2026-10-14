@@ -54,3 +54,4 @@ ID
 *.sublime-workspace
 .vscode
 
+*.egg-info/

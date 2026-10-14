@@ -36,6 +36,10 @@ void cb_specan(ubertooth_t* ut __attribute__((unused)), void* args)
 	uint16_t frequency;
 	int8_t rssi;
 
+	/* ignore stale packets from an earlier mode */
+	if (rx.pkt_type != SPECAN)
+		return;
+
 	/* process each received block */
 	for (j = 0; j < DMA_SIZE-2; j += 3) {
 		frequency = (rx.data[j] << 8) | rx.data[j + 1];
@@ -45,6 +49,7 @@ void cb_specan(ubertooth_t* ut __attribute__((unused)), void* args)
 				r = fwrite(&rx.data[j], 1, 3, dumpfile);
 				if(r != 3) {
 					fprintf(stderr, "Error writing to file (%d)\n", r);
+					ut->stop_ubertooth = 1;
 					return;
 				}
 				break;
@@ -100,7 +105,7 @@ int main(int argc, char *argv[])
 
 	ubertooth_t* ut = NULL;
 
-	while ((opt=getopt(argc,argv,"vhgGd:l::u::U:")) != EOF) {
+	while ((opt=getopt(argc,argv,"vhgGd:l:u:U:")) != EOF) {
 		switch(opt) {
 		case 'v':
 			debug++;
@@ -124,16 +129,10 @@ int main(int argc, char *argv[])
 			}
 			break;
 		case 'l':
-			if (optarg)
-				lower= atoi(optarg);
-			else
-				printf("lower: %d\n", lower);
+			lower= atoi(optarg);
 			break;
 		case 'u':
-			if (optarg)
-				upper= atoi(optarg);
-			else
-				printf("upper: %d\n", upper);
+			upper= atoi(optarg);
 			break;
 		case 'U':
 			ubertooth_device = atoi(optarg);
@@ -147,6 +146,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	if (lower < 2049 || upper > 3072 || lower > upper) {
+		fprintf(stderr, "Error: frequency range must be within 2049-3072 MHz and lower <= upper\n");
+		return 1;
+	}
+
 	ut = ubertooth_start(ubertooth_device);
 
 	if (ut == NULL) {
@@ -155,8 +159,10 @@ int main(int argc, char *argv[])
 	}
 
 	r = ubertooth_check_api(ut);
-	if (r < 0)
+	if (r < 0) {
+		ubertooth_free(ut);
 		return 1;
+	}
 
 	/* Clean up on exit. */
 	register_cleanup_handler(ut, 0);
@@ -169,17 +175,15 @@ int main(int argc, char *argv[])
 
 	// init USB transfer
 	r = ubertooth_bulk_init(ut);
-	if (r < 0)
-		return r;
-
-	r = ubertooth_bulk_thread_start();
-	if (r < 0)
-		return r;
-
+	if (r == 0)
+		r = ubertooth_bulk_thread_start();
 	// tell ubertooth to start specan and send packets
-	r = cmd_specan(ut->devh, lower, upper);
-	if (r < 0)
-		return r;
+	if (r == 0)
+		r = cmd_specan(ut->devh, lower, upper);
+	if (r < 0) {
+		ubertooth_free(ut);
+		return 1;
+	}
 
 	// receive and process each packet
 	while(!ut->stop_ubertooth) {
@@ -188,7 +192,9 @@ int main(int argc, char *argv[])
 
 	ubertooth_bulk_thread_stop();
 
-	ubertooth_stop(ut);
+	ubertooth_free(ut);
+	if (dumpfile && dumpfile != stdout)
+		fclose(dumpfile);
 	fprintf(stderr, "Ubertooth stopped\n");
-	return r;
+	return 0;
 }

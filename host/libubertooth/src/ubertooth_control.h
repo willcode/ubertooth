@@ -68,6 +68,7 @@
 #define MIN(a,b) ((a)<(b) ? (a) : (b))
 
 void show_libusb_error(int error_code);
+const char* ubertooth_transfer_status_str(int status);
 int ubertooth_cmd_sync(struct libusb_device_handle* devh,
 	                   uint8_t type,
 	                   uint8_t command,
@@ -117,14 +118,14 @@ int cmd_get_board_id(struct libusb_device_handle* devh);
 int cmd_set_squelch(struct libusb_device_handle* devh, u16 level);
 int cmd_get_squelch(struct libusb_device_handle* devh);
 int cmd_set_bdaddr(struct libusb_device_handle* devh, u64 bdaddr);
-int cmd_set_syncword(struct libusb_device_handle* devh, u64 syncword);
-int cmd_next_hop(struct libusb_device_handle* devh, u16 clk);
 int cmd_start_hopping(struct libusb_device_handle* devh, int clkn_offset, int clk100ns_offset);
 int cmd_set_clock(struct libusb_device_handle* devh, u32 clkn);
+/* returns 0 on error */
 uint32_t cmd_get_clock(struct libusb_device_handle* devh);
 int cmd_set_afh_map(struct libusb_device_handle* devh, u8* afh_map);
 int cmd_clear_afh_map(struct libusb_device_handle* devh);
 int cmd_btle_sniffing(struct libusb_device_handle* devh, uint8_t do_follow);
+/* returns 0 on error */
 u32 cmd_get_access_address(struct libusb_device_handle* devh);
 int cmd_set_access_address(struct libusb_device_handle* devh, u32 access_address);
 int cmd_do_something(struct libusb_device_handle *devh, unsigned char *data, int len);
@@ -144,5 +145,15 @@ int cmd_hop(struct libusb_device_handle* devh);
 int cmd_cancel_follow(struct libusb_device_handle* devh);
 int cmd_rfcat_subcmd(struct libusb_device_handle* devh, int cmd, uint8_t *body, size_t body_len);
 int cmd_xmas(struct libusb_device_handle* devh);
+
+/* LE requests (API 0x0108) */
+/* monitor one data channel for an access address; channel_mhz 0 stops */
+int cmd_le_monitor(struct libusb_device_handle* devh, uint16_t channel_mhz, uint32_t aa);
+/* start following a connection with host-supplied parameters */
+int cmd_le_follow_params(struct libusb_device_handle* devh, const le_follow_params_t* params);
+/* flags: le_adv_config_flags, dwell_ms: 0 = firmware default */
+int cmd_le_adv_config(struct libusb_device_handle* devh, uint16_t flags, uint16_t dwell_ms);
+/* flags: le_promisc_config_flags */
+int cmd_le_promisc_config(struct libusb_device_handle* devh, int8_t min_rssi, uint16_t flags);
 
 #endif /* __UBERTOOTH_CONTROL_H__ */

@@ -39,11 +39,13 @@ static void usage()
 	printf("Major modes:\n");
 	printf("\t-l <LAP> to decode (6 hex) - if not specified sniff all LAPs\n");
 	printf("\t-u <UAP> to decode (2 hex) - if not specified calculate UAP (requires LAP)\n");
+	printf("\t-A <map> AFH channel map (20 hex digits, as ubertooth-afh prints it);\n");
+	printf("\t   optional: without it the map is deduced\n");
 	printf("\t-z Survey mode - discover and list piconets (implies -s, interrupt with ctrl-C)\n");
 	printf("\t-i <filename> input file - if not specified use Ubertooth for live capture\n");
 	printf("\n");
 	printf("Configuration:\n");
-	printf("\t-c <BT Channel> set a fixed bluetooth channel [Default: 39]\n");
+	printf("\t-c <BT Channel> set a fixed bluetooth channel [Default: sweep all channels]\n");
 	printf("\t-e max_ac_errors (default: %d, range: 0-4)\n", max_ac_errors);
 	printf("\t-t <SECONDS> sniff timeout - 0 means no timeout [Default: 0]\n");
 	printf("\n");
@@ -69,10 +71,14 @@ int main(int argc, char* argv[])
 	uint32_t lap = 0;
 	uint8_t uap = 0;
 	uint16_t channel = 9999;
+	uint8_t afh_map[10] = { 0 };
+	int have_afh_map = 0;
 
 	ubertooth_t* ut = ubertooth_init();
+	if (ut == NULL)
+		return 1;
 
-	while ((opt=getopt(argc,argv,"hVi:l:u:U:d:e:r:sq:t:zc:")) != EOF) {
+	while ((opt=getopt(argc,argv,"hVi:l:u:U:d:e:r:sq:t:zc:A:")) != EOF) {
 		switch(opt) {
 		case 'i':
 			infile = fopen(optarg, "r");
@@ -86,6 +92,26 @@ int main(int argc, char* argv[])
 			lap = strtol(optarg, &end, 16);
 			have_lap++;
 			break;
+		case 'A': {
+			const char* h = optarg;
+			int i;
+			if (h[0] == '0' && (h[1] == 'x' || h[1] == 'X'))
+				h += 2;
+			if (strlen(h) != 20) {
+				fprintf(stderr, "-A needs 20 hex digits (10 bytes, channels 0-7 first)\n");
+				return 1;
+			}
+			for (i = 0; i < 10; i++) {
+				unsigned v;
+				if (sscanf(h + 2 * i, "%2x", &v) != 1) {
+					fprintf(stderr, "-A: not a hex map\n");
+					return 1;
+				}
+				afh_map[i] = (uint8_t)v;
+			}
+			have_afh_map = 1;
+			break;
+		}
 		case 'u':
 			uap = strtol(optarg, &end, 16);
 			have_uap++;
@@ -175,6 +201,11 @@ int main(int argc, char* argv[])
 		if (have_lap) {
 			pn = btbb_piconet_new();
 			btbb_init_piconet(pn, lap);
+			if (have_afh_map) {
+				btbb_piconet_set_afh_map(pn, afh_map);
+				btbb_piconet_set_flag(pn, BTBB_IS_AFH, 1);
+				btbb_piconet_set_flag(pn, BTBB_LOOKS_LIKE_AFH, 1);
+			}
 			if (have_uap) {
 				btbb_piconet_set_uap(pn, uap);
 				if (infile == NULL)
@@ -203,17 +234,15 @@ int main(int argc, char* argv[])
 
 		// init USB transfer
 		r = ubertooth_bulk_init(ut);
-		if (r < 0)
-			return r;
-
-		r = ubertooth_bulk_thread_start();
-		if (r < 0)
-			return r;
-
+		if (r == 0)
+			r = ubertooth_bulk_thread_start();
 		// tell ubertooth to send packets
-		r = cmd_rx_syms(ut->devh);
-		if (r < 0)
-			return r;
+		if (r == 0)
+			r = cmd_rx_syms(ut->devh);
+		if (r < 0) {
+			ubertooth_free(ut);
+			return 1;
+		}
 
 		// receive and process each packet
 		while(!ut->stop_ubertooth) {
@@ -221,12 +250,11 @@ int main(int argc, char* argv[])
 		}
 
 		ubertooth_bulk_thread_stop();
-
-		ubertooth_stop(ut);
 	} else {
 		stream_rx_file(ut, infile, cb_rx, pn);
 		fclose(infile);
 	}
+	ubertooth_free(ut);
 
 	if(survey_mode) {
 		printf("Survey Results\n");

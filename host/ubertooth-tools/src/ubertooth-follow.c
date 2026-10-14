@@ -58,13 +58,13 @@ int main(int argc, char *argv[])
 	int have_lap = 0;
 	int have_uap = 0;
 	int afh_enabled = 0;
-	uint8_t mode, afh_map[10];
+	uint8_t mode = 0, afh_map[10] = { 0 };
 	char *end;
-        int ubertooth_device = -1;
+	int ubertooth_device = -1;
 	char *bt_dev = "hci0";
 	char addr[19] = { 0 };
-	uint32_t clock;
-	uint16_t accuracy, handle, offset;
+	uint32_t clock = 0;
+	uint16_t accuracy = 0, handle = 0, offset = 0;
 	bdaddr_t bdaddr;
 	btbb_piconet *pn;
 	struct hci_dev_info di;
@@ -72,6 +72,8 @@ int main(int argc, char *argv[])
 
 	pn = btbb_piconet_new();
 	ubertooth_t* ut = ubertooth_init();
+	if (pn == NULL || ut == NULL)
+		return 1;
 
 	while ((opt=getopt(argc,argv,"hl:u:U:e:d:ab:w:r:q:")) != EOF) {
 		switch(opt) {
@@ -141,11 +143,22 @@ int main(int argc, char *argv[])
 	}
 
 	dev_id = hci_devid(bt_dev);
+	if (dev_id < 0) {
+		fprintf(stderr, "error: Unable to find %s\n", bt_dev);
+		return 1;
+	}
 	sock = hci_open_dev(dev_id);
+	if (sock < 0) {
+		perror("HCI device open failed");
+		return 1;
+	}
 
 	if ((have_lap != 1) || (have_uap != 1)) {
 		printf("No address given, reading address from device\n");
-		hci_read_bd_addr(sock, &bdaddr, 0);
+		if (hci_read_bd_addr(sock, &bdaddr, 1000) < 0) {
+			perror("Can't read local BD_ADDR");
+			return 1;
+		}
 		lap = bdaddr.b[0] | bdaddr.b[1] << 8 | bdaddr.b[2] << 16;
 		btbb_init_piconet(pn, lap);
 		uap = bdaddr.b[3];
@@ -189,10 +202,15 @@ int main(int argc, char *argv[])
 	}
 
 	//Experimental AFH map reading from remote device
+	if(afh_enabled && !cc) {
+		/* the AFH map is per connection */
+		printf("AFH map can only be read with a remote address (-l/-u)\n");
+		afh_enabled = 0;
+	}
 	if(afh_enabled) {
 		if(hci_read_afh_map(sock, handle, &mode, afh_map, 1000) < 0) {
 			perror("HCI read AFH map request failed");
-			//exit(1);
+			mode = 0;
 		}
 		if(mode == 0x01) {
 			btbb_piconet_set_afh_map(pn, afh_map);
@@ -205,31 +223,39 @@ int main(int argc, char *argv[])
 		printf("Not use AFH\n");
 	}
 
-	/* Clean up on exit. */
-	register_cleanup_handler(ut, 0);
-
-	ubertooth_connect(ut, ubertooth_device);
-	if (ut == NULL) {
+	if (ubertooth_connect(ut, ubertooth_device) < 0) {
 		usage();
+		ubertooth_free(ut);
 		return 1;
 	}
 
 	int r = ubertooth_check_api(ut);
-	if (r < 0)
+	if (r < 0) {
+		ubertooth_free(ut);
 		return 1;
+	}
+
+	/* Clean up on exit. */
+	register_cleanup_handler(ut, 0);
 
 	r = btbb_init(max_ac_errors);
-	if (r < 0)
+	if (r < 0) {
+		ubertooth_free(ut);
 		return 1;
+	}
 
 	// init USB transfer
 	r = ubertooth_bulk_init(ut);
-	if (r < 0)
-		return r;
+	if (r < 0) {
+		ubertooth_free(ut);
+		return 1;
+	}
 
 	r = ubertooth_bulk_thread_start();
-	if (r < 0)
-		return r;
+	if (r < 0) {
+		ubertooth_free(ut);
+		return 1;
+	}
 
 	cmd_set_bdaddr(ut->devh, btbb_piconet_get_bdaddr(pn));
 	cmd_set_clock(ut->devh, 0);
@@ -237,7 +263,12 @@ int main(int argc, char *argv[])
 		cmd_set_afh_map(ut->devh, afh_map);
     
     // Read clocks here to ensure clock is closest to real value
-    hci_read_clock(sock, 0, 0, &clock, &accuracy, 0);
+    if (hci_read_clock(sock, 0, 0, &clock, &accuracy, 1000) < 0) {
+        perror("Reading local clock failed");
+        ubertooth_bulk_thread_stop();
+        ubertooth_free(ut);
+        return 1;
+    }
     if (cc) {
         if (hci_read_clock_offset(sock, handle, &offset, 1000) < 0) {
             perror("Reading clock offset failed\n");
@@ -250,10 +281,12 @@ int main(int argc, char *argv[])
 
 	// tell ubertooth to start hopping and send packets
 	r = cmd_start_hopping(ut->devh, btbb_piconet_get_clk_offset(pn), 0);
-	if (r < 0)
-		return r;
+	if (r < 0) {
+		ubertooth_free(ut);
+		return 1;
+	}
 
-    if (cc) {
+	if (cc) {
 		hci_disconnect(sock, handle, HCI_OE_USER_ENDED_CONNECTION, 10000);
 	}
 
@@ -264,7 +297,8 @@ int main(int argc, char *argv[])
 
 	ubertooth_bulk_thread_stop();
 
-	ubertooth_stop(ut);
+	ubertooth_free(ut);
+	hci_close_dev(sock);
 
 	return 0;
 }

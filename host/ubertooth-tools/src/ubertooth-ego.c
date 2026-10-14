@@ -30,9 +30,9 @@
 #include <signal.h>
 
 ubertooth_t* ut = NULL;
-int running = 1;
+static volatile sig_atomic_t running = 1;
 
-void quit(int signo __attribute__((unused)))
+static void quit(int signo __attribute__((unused)))
 {
 	running = 0;
 }
@@ -100,6 +100,7 @@ int main(int argc, char *argv[])
 	if (len < 1 || len > 48) {
 		printf("Length must be in [1,48]\n");
 		usage();
+		return 1;
 	}
 
 	// access code
@@ -152,7 +153,9 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 
-		// running set to 0 in signal handlers
+		// running set to 0 in signal handlers. ego mode does not service
+		// the bulk endpoint, so poll: drain everything queued on the
+		// device, then sleep briefly when it is empty
 		while (running) {
 			int r = cmd_poll(ut->devh, &rx);
 			if (r < 0) {
@@ -162,6 +165,7 @@ int main(int argc, char *argv[])
 			if (r == sizeof(usb_pkt_rx)) {
 				fifo_push(ut->fifo, &rx);
 				cb_ego(ut, &len);
+				continue;
 			}
 			usleep(500);
 		}

@@ -23,7 +23,9 @@ if(NOT DEFINED RELEASE_STRING)
 		# We're in a git repo
 		execute_process(
 			COMMAND git status -s --untracked-files=no
+			WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
 			OUTPUT_VARIABLE DIRTY
+			ERROR_QUIET
 		)
 		if ( NOT "${DIRTY}" STREQUAL "" )
 			set(DIRTY_FLAG "*")

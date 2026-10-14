@@ -21,10 +21,18 @@
 
 # Based heavily upon the hackrf cmake setup.
 
+cmake_minimum_required(VERSION 3.10...3.31)
 project(libubertooth C)
 set(PACKAGE libubertooth)
 
 add_subdirectory(src)
+
+if(NOT DEFINED BUILD_TESTING)
+	include(CTest)
+endif()
+if(BUILD_TESTING)
+	add_subdirectory(tests)
+endif()
 
 # Create uninstall target
 if(NOT ubertooth_all_SOURCE_DIR)

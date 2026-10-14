@@ -10,7 +10,7 @@ This file is part of project Ubertooth
 Copyright 2012 Dominic Spill
 """
 
-from distutils.core import setup
+from setuptools import setup
 
 setup(
     name        = "specan",

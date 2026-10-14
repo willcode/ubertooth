@@ -37,7 +37,7 @@ FILE *fp;
 static void
 bits_init (FILE * f, char *name, int v, int s, int vb)
 {
-  char format[16];
+  char format[32];
   value = v;
   size = s * 8 - 1;
   verbose = vb;
@@ -735,7 +735,7 @@ static struct reg_t cc2400[] = {
   {0x12, "%LMTST", cc2400_lmtst},
   {0x13, "%MANOR", cc2400_manor},
   {0x14, "%MDMTST0", cc2400_mdmtst0},
-  {0x15, "%MDMTST0", cc2400_mdmtst1},
+  {0x15, "%MDMTST1", cc2400_mdmtst1},
   {0x16, "%DACTST", cc2400_dactst},
   {0x17, "%AGCTST0", cc2400_agctst0},
   {0x18, "%AGCTST1", cc2400_agctst1},

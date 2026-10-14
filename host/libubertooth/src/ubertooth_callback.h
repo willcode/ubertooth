@@ -34,4 +34,7 @@ void cb_ego(ubertooth_t* ut, void* args __attribute__((unused)));
 void cb_rx(ubertooth_t* ut, void* args);
 void cb_scan(ubertooth_t* ut, void* args);
 
+/* returns 1 (once) after the firmware reported a lost LE connection */
+int ubertooth_le_conn_lost(ubertooth_t* ut);
+
 #endif /* __UBERTOOTH_CALLBACK_H__ */

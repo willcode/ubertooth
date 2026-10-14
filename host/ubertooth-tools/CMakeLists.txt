@@ -21,6 +21,7 @@
 
 # Based heavily upon the hackrf cmake setup.
 
+cmake_minimum_required(VERSION 3.10...3.31)
 project(ubertooth-tools C)
 set(PACKAGE ubertooth-tools)
 

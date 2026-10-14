@@ -17,10 +17,11 @@
 # the Free Software Foundation, Inc., 51 Franklin Street,
 # Boston, MA 02110-1301, USA.
 
+cmake_minimum_required(VERSION 3.10...3.31)
 project(ubertooth-python)
 
 # Check for python installation
-find_package(Python3)
+find_package(Python3 COMPONENTS Interpreter)
 if(NOT Python3_FOUND)
 	return()
 else()

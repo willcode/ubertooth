@@ -69,7 +69,7 @@ void extra_info(int dd, int dev_id, bdaddr_t* bdaddr)
 	uint8_t features[8], max_page = 0;
 	char name[249], *tmp;
 	char addr[19] = { 0 };
-	uint8_t mode, afh_map[10];
+	uint8_t mode = 0, afh_map[10] = { 0 };
 	struct hci_version version;
 	struct hci_dev_info di;
 	struct hci_conn_info_req *cr;
@@ -95,6 +95,7 @@ void extra_info(int dd, int dev_id, bdaddr_t* bdaddr)
 					htobs(di.pkt_type & ACL_PTYPE_MASK),
 					0, 0x01, &handle, 25000) < 0) {
 			perror("Can't create connection");
+			free(cr);
 			return;
 		}
 		sleep(1);
@@ -157,7 +158,8 @@ void extra_info(int dd, int dev_id, bdaddr_t* bdaddr)
 	printf("\tClock offset: 0x%4.4x\n", btohs(offset));
 
 	if(hci_read_afh_map(dd, handle, &mode, afh_map, 1000) < 0) {
-	perror("HCI read AFH map request failed");
+		perror("HCI read AFH map request failed");
+		mode = 0;
 	}
 	if(mode == 0x01) {
 		// DGS: Replace with call to btbb_print_afh_map - need a piconet
@@ -254,8 +256,10 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 	rv = ubertooth_check_api(ut);
-	if (rv < 0)
+	if (rv < 0) {
+		ubertooth_free(ut);
 		return 1;
+	}
 
 	/* Set sweep mode - otherwise AFH map is useless */
 	cmd_set_channel(ut->devh, 9999);
@@ -294,17 +298,18 @@ int main(int argc, char *argv[])
 
 	// init USB transfer
 	r = ubertooth_bulk_init(ut);
-	if (r < 0)
-		return r;
+	if (r < 0) {
+		ubertooth_free(ut);
+		return 1;
+	}
 
 	r = ubertooth_bulk_thread_start();
-	if (r < 0)
-		return r;
-
-	// tell ubertooth to send packets
-	r = cmd_rx_syms(ut->devh);
-	if (r < 0)
-		return r;
+	if (r == 0)
+		r = cmd_rx_syms(ut->devh); // tell ubertooth to send packets
+	if (r < 0) {
+		ubertooth_free(ut);
+		return 1;
+	}
 
 	// receive and process each packet
 	while(!ut->stop_ubertooth) {
@@ -313,7 +318,7 @@ int main(int argc, char *argv[])
 
 	ubertooth_bulk_thread_stop();
 
-	ubertooth_stop(ut);
+	ubertooth_free(ut);
 
 	printf("\nScan results:\n");
 	while((pn=btbb_next_survey_result()) != NULL) {

@@ -20,13 +20,13 @@
 #
 #top level cmake project for ubertooth lib + tools
 
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 3.10...3.31)
 project(ubertooth_all)
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/modules
 	CACHE STRING "CMake module path")
 
-set(MAJOR_VERSION 1 CACHE INT "libUbertooth major version number")
-set(MINOR_VERSION 1 CACHE INT "libUbertooth minor version number")
+set(MAJOR_VERSION 1 CACHE STRING "libUbertooth major version number")
+set(MINOR_VERSION 1 CACHE STRING "libUbertooth minor version number")
 set( VERSION ${MAJOR_VERSION}.${MINOR_VERSION} )
 add_definitions( -DVERSION="${VERSION}" )
 
@@ -52,9 +52,10 @@ endif( ${BUILD_STATIC_LIB} AND NOT ${BUILD_SHARED_LIB} )
 
 # Complain if we're building the shared lib but static bins
 if( ${BUILD_STATIC_BINS} AND NOT ${BUILD_STATIC_LIB} )
-	message(FATAL "Building static executables not possible with shared library")
+	message(FATAL_ERROR "Building static executables not possible with shared library")
 endif( ${BUILD_STATIC_BINS} AND NOT ${BUILD_STATIC_LIB} )
 
+include(CTest)
 add_subdirectory(libubertooth)
 add_subdirectory(ubertooth-tools)
 add_subdirectory(doc)

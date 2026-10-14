@@ -27,20 +27,85 @@ set(c_sources ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth.c
               ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_callback.c
               ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_control.c
               ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_fifo.c
+              ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_le_recover.c
 			  CACHE INTERNAL "List of C sources")
 set(c_headers ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth.h
               ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_callback.h
               ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_control.h
               ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_fifo.h
 			  ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_interface.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_le_recover.h
 			  CACHE INTERNAL "List of C headers")
 
 # Include and link to libbtbb and libusb-1.0
 find_package(BTBB REQUIRED)
 find_package(USB1 REQUIRED)
 
+find_package(Threads REQUIRED)
+
 include_directories(${LIBUSB_INCLUDE_DIR} ${LIBBTBB_INCLUDE_DIR})
-LIST(APPEND LIBUBERTOOTH_LIBS ${LIBUSB_LIBRARIES} ${LIBBTBB_LIBRARIES})
+LIST(APPEND LIBUBERTOOTH_LIBS ${LIBUSB_LIBRARIES} ${LIBBTBB_LIBRARIES} Threads::Threads)
+
+# Optional HackRF Pro backend (BR channelizer gateware): needs libhackrf
+find_package(PkgConfig)
+if(PKG_CONFIG_FOUND)
+	pkg_check_modules(LIBHACKRF libhackrf)
+endif()
+if(LIBHACKRF_FOUND)
+	message(STATUS "Building the HackRF Pro backend (libhackrf ${LIBHACKRF_VERSION})")
+	add_definitions(-DHAVE_LIBHACKRF)
+	include_directories(${LIBHACKRF_INCLUDE_DIRS})
+	link_directories(${LIBHACKRF_LIBRARY_DIRS})
+	LIST(APPEND LIBUBERTOOTH_LIBS ${LIBHACKRF_LIBRARIES})
+	set(c_sources ${c_sources} ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_hackrf.c
+		CACHE INTERNAL "List of C sources")
+	# the gateware loaded into a selected HackRF Pro: the BR channelizer
+	# image built by hackrf-ubertooth (fpga-build/packs/br_rx.pack), installed
+	# when UBERTOOTH_HACKRF_PACK_FILE names it; UBERTOOTH_HACKRF_PACK in the
+	# environment overrides the path at run time
+	set(UBERTOOTH_HACKRF_PACK_FILE "" CACHE FILEPATH
+		"BR channelizer gateware for the HackRF Pro backend (br_rx.pack) to install")
+	set(UBERTOOTH_HACKRF_PACK_DIR ${CMAKE_INSTALL_PREFIX}/share/ubertooth)
+	add_definitions(-DUBERTOOTH_HACKRF_PACK_DEFAULT="${UBERTOOTH_HACKRF_PACK_DIR}/br_rx.pack")
+	if(UBERTOOTH_HACKRF_PACK_FILE)
+		install(FILES ${UBERTOOTH_HACKRF_PACK_FILE} DESTINATION ${UBERTOOTH_HACKRF_PACK_DIR}
+			RENAME br_rx.pack)
+	else()
+		message(STATUS "UBERTOOTH_HACKRF_PACK_FILE not set: the HackRF Pro gateware is not installed")
+	endif()
+else()
+	message(STATUS "libhackrf not found: no HackRF Pro backend")
+endif()
+
+# Optional libbtbb features (newer libbtbb releases)
+include(CheckSymbolExists)
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_INCLUDES ${LIBBTBB_INCLUDE_DIR})
+set(CMAKE_REQUIRED_LIBRARIES ${LIBBTBB_LIBRARIES})
+check_symbol_exists(lell_allocate_and_decode_len "btbb.h" HAVE_LELL_ALLOCATE_AND_DECODE_LEN)
+check_symbol_exists(lell_packet_set_encrypted "btbb.h" HAVE_LELL_PACKET_SET_ENCRYPTED)
+check_symbol_exists(lell_packet_set_direction "btbb.h" HAVE_LELL_PACKET_SET_DIRECTION)
+check_symbol_exists(btbb_find_ac_checked "btbb.h" HAVE_BTBB_FIND_AC_CHECKED)
+check_symbol_exists(btbb_set_behind "btbb.h" HAVE_BTBB_SET_BEHIND)
+cmake_pop_check_state()
+if(HAVE_LELL_ALLOCATE_AND_DECODE_LEN)
+	add_definitions(-DHAVE_LELL_ALLOCATE_AND_DECODE_LEN)
+else()
+	message(WARNING "libbtbb lacks lell_allocate_and_decode_len(): LE packets longer than 64 bytes will not be decoded")
+endif()
+if(HAVE_BTBB_FIND_AC_CHECKED)
+	add_definitions(-DHAVE_BTBB_FIND_AC_CHECKED)
+endif()
+if(HAVE_BTBB_SET_BEHIND)
+	add_definitions(-DHAVE_BTBB_SET_BEHIND)
+endif()
+if(HAVE_LELL_PACKET_SET_DIRECTION)
+	add_definitions(-DHAVE_LELL_PACKET_SET_DIRECTION)
+endif()
+if(HAVE_LELL_PACKET_SET_ENCRYPTED)
+	add_definitions(-DHAVE_LELL_PACKET_SET_ENCRYPTED)
+endif()
 
 if( ${BUILD_SHARED_LIB} )
 	# Shared library

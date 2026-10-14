@@ -27,6 +27,33 @@
 #include "cc2400.h"
 #include "ubertooth_interface.h"
 
+/*
+ * Interrupt masking for short critical sections.  irq_save() masks all
+ * maskable interrupts (PRIMASK) and returns the previous PRIMASK value;
+ * irq_restore() puts it back, so the pair nests correctly.
+ */
+#define UBERTOOTH_HAVE_IRQ_HELPERS 1
+static inline uint32_t irq_save(void)
+{
+	uint32_t primask;
+	__asm__ volatile ("mrs %0, primask\n\tcpsid i" : "=r" (primask) : : "memory");
+	return primask;
+}
+
+static inline void irq_restore(uint32_t primask)
+{
+	__asm__ volatile ("msr primask, %0" : : "r" (primask) : "memory");
+}
+
+/* data memory barrier: order memory accesses (e.g. ring buffer publish) */
+static inline void dmb(void)
+{
+	__asm__ volatile ("dmb" : : : "memory");
+}
+
+/* zero-initialized storage in the 16 kB AHB SRAM bank (0x2007C000) */
+#define AHB_BSS __attribute__ ((section(".ahb_bss")))
+
 typedef void (*IAP_ENTRY)(u32[], u32[]);
 extern const IAP_ENTRY iap_entry;
 
@@ -330,6 +357,12 @@ void cc2400_set8(u8 reg, u8 val);
 void cc2400_fifo_write(u8 len, u8 *data);
 void cc2400_fifo_read(u8 len, u8 *buf);
 u8 cc2400_status(void);
+/* wait (bounded, a few ms) for CC2400 status bits to be set (set=1) or
+ * clear (set=0); returns 1 on success, 0 on timeout */
+int cc2400_wait_status(u8 mask, int set);
+/* reset the MCU through the watchdog after ms milliseconds, even if the
+ * main loop is stuck (used for UBERTOOTH_RESET / UBERTOOTH_FLASH) */
+void wdt_reset_in(unsigned ms);
 u8 cc2400_strobe(u8 reg);
 void cc2400_reset(void);
 void clock_start(void);

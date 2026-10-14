@@ -53,8 +53,16 @@ extern unsigned long _edata;
 extern unsigned long _etext;
 extern unsigned long _bss;
 extern unsigned long _ebss;
+extern unsigned long _ahb_bss;
+extern unsigned long _ahb_ebss;
 
-extern void __libc_init_array(void);
+/* constructor tables, defined in sections.ld */
+typedef void (*init_fn_t)(void);
+extern init_fn_t __preinit_array_start[];
+extern init_fn_t __preinit_array_end[];
+extern init_fn_t __init_array_start[];
+extern init_fn_t __init_array_end[];
+
 extern int main(void);
 
 /* Reset Handler */
@@ -76,7 +84,20 @@ void Reset_Handler(void)
 		*src++ = 0;
 	}
 
-	__libc_init_array();
+	// Initialize the AHB SRAM .ahb_bss segment to zeros
+	src = &_ahb_bss;
+	while (src < &_ahb_ebss)
+	{
+		*src++ = 0;
+	}
+
+	// Run constructors.  Done here rather than with newlib's
+	// __libc_init_array(), which needs crti's _init() and drags the
+	// startup files (and newlib's stdio/atexit state) into the link.
+	for (init_fn_t *fn = __preinit_array_start; fn < __preinit_array_end; fn++)
+		(*fn)();
+	for (init_fn_t *fn = __init_array_start; fn < __init_array_end; fn++)
+		(*fn)();
 
 	// Set the vector table location.
 	SCB_VTOR = (uint32_t)&_interrupt_vector_table;

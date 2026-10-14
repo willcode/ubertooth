@@ -20,6 +20,13 @@
  */
 
 #include "cc2400_rangetest.h"
+#include "ubertooth_usb.h"
+#include "ubertooth_clock.h"
+
+extern volatile uint8_t requested_mode;
+
+/* how long cc2400_rangetest() waits for the repeated packet, in CLKN ticks */
+#define RANGETEST_REPLY_TIMEOUT (2 * 3200) /* 2 s */
 
 /*
  * This range test transmits a Bluetooth-like (but not Bluetooth compatible)
@@ -59,6 +66,10 @@ void cc2400_rangetest(volatile u16 *chan_ptr)
 	u8 pa = 0;
 	u8 txbuf[len];
 	u8 rxbuf[len];
+	u32 start;
+	int got_reply = 0;
+
+	rr.valid = 0;
 
 	txbuf[0] = len - 1; // length of data (rest of payload)
 	txbuf[1] = 0; // request
@@ -99,9 +110,9 @@ void cc2400_rangetest(volatile u16 *chan_ptr)
 	cc2400_set(SYNCL,   0x1584);
 	cc2400_set(FREND,   8 | pa);
 	cc2400_set(MDMCTRL, 0x0029);
-	while (!(cc2400_status() & XOSC16M_STABLE));
+	cc2400_wait_status(XOSC16M_STABLE, 1);
 	cc2400_strobe(SFSON);
-	while (!(cc2400_status() & FS_LOCK));
+	cc2400_wait_status(FS_LOCK, 1);
 	TXLED_SET;
 #ifdef UBERTOOTH_ONE
 	PAEN_SET;
@@ -122,32 +133,44 @@ void cc2400_rangetest(volatile u16 *chan_ptr)
 	while ((cc2400_get(FSMSTATE) & 0x1f) != STATE_STROBE_FS_ON);
 	TXLED_CLR;
 	cc2400_strobe(SRFOFF);
-	while ((cc2400_status() & FS_LOCK));
+	cc2400_wait_status(FS_LOCK, 0);
 	cc2400_set(FSDIV, *chan_ptr - 1);
-	while (!(cc2400_status() & XOSC16M_STABLE));
+	cc2400_wait_status(XOSC16M_STABLE, 1);
 	cc2400_strobe(SFSON);
-	while (!(cc2400_status() & FS_LOCK));
+	cc2400_wait_status(FS_LOCK, 1);
 	RXLED_SET;
-	while (1) {
+	/* wait for the repeated packet, but not forever, and keep USB alive */
+	clkn_start();
+	start = clkn;
+	while (!got_reply) {
 		while ((cc2400_get(FSMSTATE) & 0x1f) != STATE_STROBE_FS_ON);
 		cc2400_strobe(SRX);
-		while (!(cc2400_status() & SYNC_RECEIVED));
+		while (!(cc2400_status() & SYNC_RECEIVED)) {
+			handle_usb(clkn);
+			if (requested_mode != MODE_RANGE_TEST ||
+					(u32)(clkn - start) > RANGETEST_REPLY_TIMEOUT)
+				break;
+		}
+		if (!(cc2400_status() & SYNC_RECEIVED))
+			break; /* timed out or canceled */
 		USRLED_SET;
 		for (j = 0; j < len; j++)
 			rxbuf[j] = cc2400_get8(FIFOREG);
 		if (cc2400_status() & STATUS_CRC_OK)
-			break;
+			got_reply = 1;
 		USRLED_CLR;
 	}
 
 	// done
-	while ((cc2400_get(FSMSTATE) & 0x1f) != STATE_STROBE_FS_ON);
 	cc2400_strobe(SRFOFF);
-	while ((cc2400_status() & FS_LOCK));
+	cc2400_wait_status(FS_LOCK, 0);
 #ifdef UBERTOOTH_ONE
 	PAEN_CLR;
 #endif
 	RXLED_CLR;
+
+	if (!got_reply)
+		return; /* rr.valid stays 0 */
 
 	// get test result
 	rr.valid       = 1;
@@ -176,8 +199,9 @@ void cc2400_repeater(volatile u16 *chan_ptr)
 	u8 pa = 0;
 	u8 buf[len];
 
-	//FIXME allow to be turned off
-	while (1) {
+	clkn_start();
+
+	while (requested_mode == MODE_REPEATER) {
 		cc2400_set(LMTST,   0x2b22);
 		cc2400_set(MDMTST0, 0x134b);
 		cc2400_set(FSDIV,   *chan_ptr - 1);
@@ -185,9 +209,9 @@ void cc2400_repeater(volatile u16 *chan_ptr)
 		cc2400_set(SYNCL,   0x1584);
 		cc2400_set(FREND,   0x0008); // minimum tx power
 		cc2400_set(MDMCTRL, 0x0029); // 160 kHz frequency deviation
-		while (!(cc2400_status() & XOSC16M_STABLE));
+		cc2400_wait_status(XOSC16M_STABLE, 1);
 		cc2400_strobe(SFSON);
-		while (!(cc2400_status() & FS_LOCK));
+		cc2400_wait_status(FS_LOCK, 1);
 		RXLED_SET;
 		TXLED_CLR;
 		USRLED_CLR;
@@ -198,7 +222,12 @@ void cc2400_repeater(volatile u16 *chan_ptr)
 			while ((cc2400_get(FSMSTATE) & 0x1f) != STATE_STROBE_FS_ON);
 			USRLED_CLR;
 			cc2400_strobe(SRX);
-			while (!(cc2400_status() & SYNC_RECEIVED));
+			/* keep USB alive and allow the repeater to be stopped */
+			while (!(cc2400_status() & SYNC_RECEIVED)) {
+				handle_usb(clkn);
+				if (requested_mode != MODE_REPEATER)
+					return;
+			}
 			USRLED_SET;
 			for (i = 0; i < len; i++)
 				buf[i] = cc2400_get8(FIFOREG);
@@ -210,10 +239,10 @@ void cc2400_repeater(volatile u16 *chan_ptr)
 		USRLED_CLR;
 		RXLED_CLR;
 		cc2400_strobe(SRFOFF);
-		while ((cc2400_status() & FS_LOCK));
-		while (!(cc2400_status() & XOSC16M_STABLE));
+		cc2400_wait_status(FS_LOCK, 0);
+		cc2400_wait_status(XOSC16M_STABLE, 1);
 		cc2400_set(FSDIV, *chan_ptr);
-		while (!(cc2400_status() & XOSC16M_STABLE));
+		cc2400_wait_status(XOSC16M_STABLE, 1);
 		cc2400_strobe(SFSON);
 		TXLED_SET;
 		buf[0] = len - 1; // length of data (rest of payload)
@@ -231,7 +260,7 @@ void cc2400_repeater(volatile u16 *chan_ptr)
 		}
 		TXLED_CLR;
 		cc2400_strobe(SRFOFF);
-		while ((cc2400_status() & FS_LOCK));
+		cc2400_wait_status(FS_LOCK, 0);
 	}
 }
 #endif
@@ -254,9 +283,9 @@ void cc2400_txtest(volatile u8 *mod_ptr, volatile u16 *chan_ptr)
 	cc2400_set(FSDIV,   *chan_ptr);
 	cc2400_set(MDMCTRL, mdmctrl);
 
-	while (!(cc2400_status() & XOSC16M_STABLE));
+	cc2400_wait_status(XOSC16M_STABLE, 1);
 	cc2400_strobe(SFSON);
-	while (!(cc2400_status() & FS_LOCK));
+	cc2400_wait_status(FS_LOCK, 1);
 	TXLED_SET;
 	cc2400_strobe(STX);
 #ifdef UBERTOOTH_ONE

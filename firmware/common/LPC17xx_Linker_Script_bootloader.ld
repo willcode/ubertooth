@@ -28,6 +28,8 @@ MEMORY
 {
   rom (rx)  : ORIGIN = 0x00000000, LENGTH =  16K
   ram (rwx) : ORIGIN = 0x10000000, LENGTH =  16K
+  /* AHB SRAM bank 0 (see LPC17xx_Linker_Script_with_bootloader.ld) */
+  ahbram (rwx) : ORIGIN = 0x2007C000, LENGTH = 16K
 }
 
 INCLUDE sections.ld

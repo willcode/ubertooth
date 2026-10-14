@@ -5,8 +5,6 @@
  * terms of the GPL. Refer to COPYING for more information.
  */
 
-#include <stdlib.h>
-
 #include "ubertooth.h"
 
 extern volatile uint8_t requested_mode;
@@ -32,7 +30,19 @@ static void timer2_stop(void) {
 	PCONP &= ~PCONP_PCTIM2;
 }
 
-#define BLINK (NOW + 400 + (rand() % 1200))
+/*
+ * Small xorshift PRNG.  newlib's rand() keeps its state in the reentrancy
+ * structure, which pulls newlib's stdio state (~1 kB of RAM) into the link.
+ */
+static uint32_t xmas_rand(void) {
+	static uint32_t x = 2463534242u;
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	return x;
+}
+
+#define BLINK (NOW + 400 + (xmas_rand() % 1200))
 
 void xmas_main(void) {
 	// enable USB interrupts

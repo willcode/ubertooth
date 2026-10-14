@@ -30,4 +30,12 @@ SRC = $(TARGET).c \
 	$(LPCUSB_PATH)/usbhw_lpc.c \
 	$(LPCUSB_PATH)/usbstdreq.c
 
+# Reset_Handler (LPC17xx_Startup.c) does all the C runtime setup.  Without
+# this, newlib's crt0 is linked in and drags ~1 kB of stdio/atexit state
+# (__sf, _impure_data, __atexit0) into the 16 kB local SRAM.
+LINKER_OPTS += -nostartfiles
+
+# fail the link if less than 4 kB of local SRAM is left for the stack
+LINKER_OPTS += -Wl,--defsym=_min_stack_size=4096
+
 include ../common.mk

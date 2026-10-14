@@ -43,10 +43,44 @@ static uint8_t count_bits(uint64_t n)
 	return i;
 }
 
+/* is channel (MHz) marked used in afh_map? */
+int afh_channel_used(u16 channel)
+{
+	unsigned c = channel - 2402;
+
+	if (c >= NUM_BREDR_CHANNELS)
+		return 0;
+	return (afh_map[c / 8] >> (c % 8)) & 1;
+}
+
+/*
+ * Recompute used_channels and the AFH mapping table from afh_map.  Must be
+ * called whenever afh_map changes.  afh_bank lists the used channels in
+ * register bank order (0, 2, ..., 78, 1, 3, ..., 77), as the AFH
+ * remapping function requires (Core Spec Vol 2 Part B 2.6.4.7).
+ */
+void afh_update(void)
+{
+	u8 i, j, chan;
+
+	afh_map[9] &= 0x7f; /* bit 79 is reserved */
+
+	used_channels = 0;
+	for (i = 0; i < 10; i++)
+		used_channels += count_bits((uint64_t) afh_map[i]);
+
+	j = 0;
+	for (i = 0; i < NUM_BREDR_CHANNELS; i++) {
+		chan = (i * 2) % NUM_BREDR_CHANNELS;
+		if (afh_map[chan/8] & (0x1 << (chan % 8)))
+			afh_bank[j++] = chan;
+	}
+}
+
 /* do all of the one time precalculation */
 void precalc(void)
 {
-	u8 i, j, chan;
+	u8 i;
 	u32 address;
 	address = target.address & 0xffffffff;
 	syncword = 0;
@@ -74,17 +108,7 @@ void precalc(void)
 		((address >> 2) & 0x02) +
 		((address >> 1) & 0x01);
 
-	if(afh_enabled) {
-		used_channels = 0;
-		for(i = 0; i < 10; i++)
-			used_channels += count_bits((uint64_t) afh_map[i]);
-		j = 0;
-		for (i = 0; i < NUM_BREDR_CHANNELS; i++) {
-			chan = (i * 2) % NUM_BREDR_CHANNELS;
-			if(afh_map[chan/8] & (0x1 << (chan % 8)))
-				bank[j++] = chan;
-		}
-	}
+	afh_update();
 }
 
 /* 5 bit permutation */
@@ -133,8 +157,14 @@ u16 next_hop(u32 clock)
 	u8 a, c, x, y1, perm, next_channel;
 	u16 d, y2;
 	u32 base_f, f, f_dash;
+	int afh = afh_enabled && used_channels > 0;
 
-	clock &= 0xffffffff;
+	/* With AFH the slave answers on the channel of the preceding master
+	 * slot ("same channel mechanism"): use the master slot's clock,
+	 * i.e. CLK1 = 0, for both slots of a pair. */
+	if (afh)
+		clock &= ~(u32)0x2;
+
 	/* Variable names used in Vol 2, Part B, Section 2.6 of the spec */
 	x = (clock >> 2) & 0x1f;
 	y1 = (clock >> 1) & 0x01;
@@ -153,7 +183,10 @@ u16 next_hop(u32 clock)
 		d);
 	/* hop selection */
 	next_channel = bank[(perm + e + f + y2) % NUM_BREDR_CHANNELS];
-	if(afh_enabled) {
+
+	/* AFH: a channel from the basic sequence is kept if it is used;
+	 * only unused channels are remapped onto the used set */
+	if (afh && !(afh_map[next_channel/8] & (1 << (next_channel % 8)))) {
 		f_dash = base_f % used_channels;
 		next_channel = afh_bank[(perm + e + f_dash + y2) % used_channels];
 	}

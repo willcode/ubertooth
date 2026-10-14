@@ -27,6 +27,10 @@ MEMORY
 {
   rom (rx)  : ORIGIN = 0x00004000, LENGTH = (128K - 16384)
   ram (rwx) : ORIGIN = 0x10000000, LENGTH =  16K
+  /* AHB SRAM bank 0, present on every LPC175x/6x with >= 32 kB SRAM
+   * (LPC1754/LPC1756 on Ubertooth One, LPC1758 on Ubertooth Zero).
+   * NOT present on the 16 kB LPC1752. */
+  ahbram (rwx) : ORIGIN = 0x2007C000, LENGTH = 16K
 }
 
 INCLUDE sections.ld

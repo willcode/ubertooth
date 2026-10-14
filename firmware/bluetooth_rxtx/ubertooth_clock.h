@@ -23,6 +23,7 @@
 #define __UBERTOOTH_CLOCK_H value
 
 #include "inttypes.h"
+#include "lpc17.h"
 
 /*
  * CLK100NS is a free-running clock with a period of 100 ns.  It resets every
@@ -45,7 +46,35 @@ extern volatile uint16_t clk_drift_correction;
 extern volatile uint32_t clkn_last_drift_fix;
 extern volatile uint32_t clkn_next_drift_fix;
 
-#define CLK100NS (3125*(clkn & 0xfffff) + T0TC)
+/*
+ * Current time in 100 ns units: 3125 * clkn[19:0] + T0TC, wrapping at
+ * 3276800000.  clkn and T0TC are read consistently:
+ *  - retry if TIMER0_IRQHandler ran between the two reads;
+ *  - if a tick has happened but its interrupt is still pending (caller
+ *    runs at TIMER0's priority or above, or with interrupts masked),
+ *    account for it;
+ *  - T0TC exceeds 3124 only while a positive clock trim stretches the
+ *    tick; clamp so the value never runs ahead of the next tick.
+ */
+static inline uint32_t clk100ns_read(void)
+{
+	uint32_t c, t, pend;
+
+	do {
+		c = clkn;
+		pend = T0IR & TIR_MR0_Interrupt;
+		t = T0TC;
+	} while (c != clkn || pend != (T0IR & TIR_MR0_Interrupt));
+
+	if (pend)
+		c += 1;
+	if (t > 3124)
+		t = 3124;
+
+	return 3125 * (c & 0xfffff) + t;
+}
+
+#define CLK100NS (clk100ns_read())
 #define LE_BASECLK (12500)                    // 1.25 ms in units of 100ns
 
 void clkn_stop();

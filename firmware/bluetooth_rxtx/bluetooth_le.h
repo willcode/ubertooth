@@ -64,12 +64,13 @@ typedef struct _le_state_t {
     u8 target[6];               // target MAC for connection following (byte order reversed)
     u8 target_mask[6];          // mask for MAC connection following (byte order reversed)
     int target_set;             // whether a target has been set (default: false)
+    int aa_set;                 // promiscuous mode: host provided the access address
     u32 last_packet;            // when was the last packet received
 } le_state_t;
 
 // for handling LE channel maps
 typedef struct _le_channel_remapping_t {
-	int         channel_in_use[37];
+	uint8_t     channel_in_use[37];
 	uint8_t     remapping_index[37]; // array of channel indices
 	unsigned    total_channels;
 } le_channel_remapping_t;
@@ -104,6 +105,14 @@ u32 btle_crcgen_lut(u32 crc_init, u8 *data, int len);
 void le_dewhiten(uint8_t *data, unsigned size, unsigned channel);
 void le_parse_channel_map(uint8_t *channel_map, le_channel_remapping_t *remapping);
 uint8_t le_map_channel(uint8_t channel_idx, le_channel_remapping_t *remapping);
+uint8_t le_dewhiten_byte(unsigned channel, unsigned offset, uint8_t data);
+uint32_t le_reverse_crc_init(uint32_t crc_init);
+int le_crc_ok(uint32_t crc_init_reversed, const uint8_t *pdu, unsigned size);
+uint8_t le_csa1_channel(uint16_t counter, uint8_t hop_increment,
+		le_channel_remapping_t *remapping);
+uint16_t le_csa2_prn_e(uint16_t counter, uint16_t channel_id);
+uint8_t le_csa2_channel(uint16_t counter, uint16_t channel_id,
+		le_channel_remapping_t *remapping);
 
 static const u32 whitening_word[40][12] = {
 	{ 0xc3bcb240, 0x5f4a371f, 0x9a9cf685, 0x44c5d6c1, 0xe1de5920, 0xafa51b8f,

@@ -56,7 +56,6 @@
 
 
 
-#define	MAX_CONTROL_SIZE	128	/**< maximum total size of control transfer data */
 #define	MAX_REQ_HANDLERS	4	/**< standard, class, vendor, reserved */
 
 static TSetupPacket		Setup;	/**< setup packet */
@@ -69,6 +68,8 @@ static int				iLen;		/**< total length of control transfer */
 static TFnHandleRequest *apfnReqHandlers[4] = {NULL, NULL, NULL, NULL};
 /** Array of installed request data pointers */
 static U8				*apbDataStore[4] = {NULL, NULL, NULL, NULL};
+/** Size in bytes of each installed request data store */
+static int				aiDataStoreLen[4] = {0, 0, 0, 0};
 
 
 /** Internal function filtering Vendor requests to handle OS Descriptors */
@@ -126,6 +127,12 @@ static void StallControlPipe(U8 bEPStat)
 
 	USBHwEPStall(0x80, TRUE);
 
+	// Make sure nothing more is stored or sent for this transfer: any
+	// remaining OUT data packets are read and discarded (pbData == NULL),
+	// and the host gets the STALL on the IN status/data stage.
+	pbData = NULL;
+	iResidue = 0;
+
 // dump setup packet
 	DBG("STALL on [");
 	pb = (U8 *)&Setup;
@@ -175,6 +182,11 @@ void USBHandleControlTransfer(U8 bEP, U8 bEPStat)
 
 			if ((Setup.wLength == 0) ||
 				(REQTYPE_GET_DIR(Setup.bmRequestType) == REQTYPE_DIR_TO_HOST)) {
+				// Handlers must set *piLen for any data they return;
+				// default to no data rather than to wLength, which
+				// would send wLength bytes of whatever follows the
+				// data store.
+				iLen = 0;
 				// ask installed handler to process request
 				if (!_HandleRequest(&Setup, &iLen, &pbData)) {
 					DBG("_HandleRequest1 failed\n");
@@ -183,15 +195,32 @@ void USBHandleControlTransfer(U8 bEP, U8 bEPStat)
 				}
 				// send smallest of requested and offered length
 				iResidue = MIN(iLen, Setup.wLength);
+				if (iResidue < 0) {
+					iResidue = 0;
+				}
+				// never read past the end of the data store
+				if ((pbData == apbDataStore[iType]) &&
+					(iResidue > aiDataStoreLen[iType])) {
+					iResidue = aiDataStoreLen[iType];
+				}
 				// send first part (possibly a zero-length status message)
 				DataIn();
+			}
+			else if ((pbData == NULL) ||
+					 (Setup.wLength > aiDataStoreLen[iType])) {
+				// host-to-device data stage that does not fit in the
+				// data store (or there is no store): refuse it
+				DBG("OUT data stage too long (%d)\n", Setup.wLength);
+				StallControlPipe(bEPStat);
+				return;
 			}
 		}
 		else {		
 			if (iResidue > 0) {
 				// store data
 				iChunk = USBHwEPRead(0x00, pbData, iResidue);
-				if (iChunk < 0) {
+				if ((iChunk < 0) || (iChunk > iResidue)) {
+					// error, or host sent more than announced in wLength
 					StallControlPipe(bEPStat);
 					return;
 				}
@@ -234,12 +263,16 @@ void USBHandleControlTransfer(U8 bEP, U8 bEPStat)
 	@param [in]	iType			Type of request, e.g. REQTYPE_TYPE_STANDARD
 	@param [in]	*pfnHandler		Callback function pointer
 	@param [in]	*pbDataStore	Data storage area for this type of request
+	@param [in]	iDataStoreLen	Size of pbDataStore in bytes; control
+								transfers with a longer data stage are
+								stalled
  */
-void USBRegisterRequestHandler(int iType, TFnHandleRequest *pfnHandler, U8 *pbDataStore)
+void USBRegisterRequestHandlerSized(int iType, TFnHandleRequest *pfnHandler, U8 *pbDataStore, int iDataStoreLen)
 {
 	ASSERT(iType >= 0);
 	ASSERT(iType < 4);
 	apfnReqHandlers[iType] = pfnHandler;
 	apbDataStore[iType] = pbDataStore;
+	aiDataStoreLen[iType] = (pbDataStore != NULL) ? iDataStoreLen : 0;
 }
 

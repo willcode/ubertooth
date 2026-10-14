@@ -91,7 +91,7 @@ static u8 abDescriptors[] = {
 	MAX_PACKET_SIZE0,  		// bMaxPacketSize
 	LE_WORD(ID_VENDOR),		// idVendor
 	LE_WORD(ID_PRODUCT),		// idProduct
-	LE_WORD(0x0107),		// bcdDevice
+	LE_WORD(UBERTOOTH_API_VERSION),	// bcdDevice (host checks it)
 	0x01,              		// iManufacturer
 	0x02,              		// iProduct
 	0x03,              		// iSerialNumber
@@ -212,7 +212,13 @@ VendorRequestHandler *v_req_handler;
 BOOL usb_vendor_request_handler(TSetupPacket *pSetup, int *piLen, u8 **ppbData)
 {
 	int rv;
-	u16 params[3] = {pSetup->wValue, pSetup->wIndex, pSetup->wLength};
+	/* params[2] is the number of data bytes received from the host in
+	 * *ppbData: wLength for host-to-device requests, 0 otherwise.  The
+	 * control layer has already checked it against the buffer size. */
+	u16 data_in_len =
+		(REQTYPE_GET_DIR(pSetup->bmRequestType) == REQTYPE_DIR_TO_DEVICE)
+		? pSetup->wLength : 0;
+	u16 params[3] = {pSetup->wValue, pSetup->wIndex, data_in_len};
 	rv = v_req_handler(pSetup->bRequest, params, *ppbData, piLen);
 	return (BOOL) (rv==1);
 }
@@ -258,6 +264,11 @@ int ubertooth_usb_init(VendorRequestHandler *vendor_req_handler)
 	// enable USB interrupts
 	//ISER0 = ISER0_ISE_USB;
 
+	// In modes that enable the USB interrupt, vendor requests run in the
+	// USB ISR.  Give it a lower priority (8) than TIMER0/EINT3 (0) so a
+	// long request cannot delay the CLKN tick.
+	IPR6 = (IPR6 & ~IPR6_IP_USB) | (8 << 3);
+
 	// Enable WCID / driverless setup on Windows - Consumes Vendor Request 0xFF
 	USBRegisterWinusbInterface(0xFF, "{8ac47a88-cc26-4aa9-887b-42ca8cf07a63}");
 
@@ -267,7 +278,19 @@ int ubertooth_usb_init(VendorRequestHandler *vendor_req_handler)
 	return 0;
 }
 
-usb_pkt_rx fifo[128];
+/*
+ * Single-producer/single-consumer ring buffer of USB packets.  Only the
+ * producer writes tail and only the consumer writes head.  A slot is
+ * published (tail advanced) only after it has been filled, and released
+ * (head advanced) only after it has been copied out, so producer and
+ * consumer may run in different contexts (main loop vs. ISR).
+ *
+ * 128 * 64 bytes = 8 kB, placed in the AHB SRAM bank to keep the local
+ * SRAM free for the stack.
+ */
+#define FIFO_LEN  128
+#define FIFO_MASK (FIFO_LEN - 1)
+usb_pkt_rx fifo[FIFO_LEN] AHB_BSS;
 
 volatile u32 head = 0;
 volatile u32 tail = 0;
@@ -279,34 +302,56 @@ void usb_queue_init(void)
 	memset(fifo, 0, sizeof(fifo));
 }
 
-usb_pkt_rx *usb_enqueue(void)
+/* Get the next free slot without publishing it, or NULL if full. */
+usb_pkt_rx *usb_enqueue_reserve(void)
 {
-	u8 h = head & 0x7F;
-	u8 t = tail & 0x7F;
-	u8 n = (t + 1) & 0x7F;
+	u32 t = tail;
 
 	/* fail if queue is full */
-	if (h == n) {
+	if (((t + 1) & FIFO_MASK) == (head & FIFO_MASK))
 		return NULL;
-	}
 
-	++tail;
-	return &fifo[t];
-
+	return &fifo[t & FIFO_MASK];
 }
 
-usb_pkt_rx *dequeue(void)
+/* Publish the slot returned by the last usb_enqueue_reserve(). */
+void usb_enqueue_commit(void)
 {
-	u8 h = head & 0x7F;
-	u8 t = tail & 0x7F;
+	dmb(); /* slot contents must be visible before the new tail */
+	tail = tail + 1;
+}
+
+/*
+ * Legacy interface: reserves *and publishes* a slot before the caller has
+ * filled it.  Only safe if the consumer cannot run until the caller has
+ * finished filling the slot.  Prefer usb_enqueue_reserve()/commit().
+ */
+usb_pkt_rx *usb_enqueue(void)
+{
+	usb_pkt_rx *f = usb_enqueue_reserve();
+	if (f != NULL)
+		usb_enqueue_commit();
+	return f;
+}
+
+/* Oldest published packet, without releasing it, or NULL if empty. */
+usb_pkt_rx *usb_dequeue_peek(void)
+{
+	u32 h = head;
 
 	/* fail if queue is empty */
-	if (h == t) {
+	if ((h & FIFO_MASK) == (tail & FIFO_MASK))
 		return NULL;
-	}
 
-	++head;
-	return &fifo[h];
+	dmb(); /* read slot contents only after observing the tail */
+	return &fifo[h & FIFO_MASK];
+}
+
+/* Release the packet returned by usb_dequeue_peek(). */
+void usb_dequeue_release(void)
+{
+	dmb(); /* finish reading the slot before handing it back */
+	head = head + 1;
 }
 
 #define USB_KEEP_ALIVE 400000
@@ -314,16 +359,18 @@ u32 last_usb_pkt = 0;  // for keep alive packets
 
 int dequeue_send(u32 clkn)
 {
-	usb_pkt_rx *pkt = dequeue();
+	usb_pkt_rx *pkt = usb_dequeue_peek();
 	if (pkt != NULL) {
 		last_usb_pkt = clkn;
 		USBHwEPWrite(BULK_IN_EP, (u8 *)pkt, sizeof(usb_pkt_rx));
+		usb_dequeue_release();
 		return 1;
 	} else {
 		if (clkn - last_usb_pkt > USB_KEEP_ALIVE) {
-			u8 pkt_type = KEEP_ALIVE;
+			/* USBHwEPWrite reads whole words */
+			u8 pkt_type[4] = { KEEP_ALIVE, 0, 0, 0 };
 			last_usb_pkt = clkn;
-			USBHwEPWrite(BULK_IN_EP, &pkt_type, 1);
+			USBHwEPWrite(BULK_IN_EP, pkt_type, 1);
 		}
 		return 0;
 	}

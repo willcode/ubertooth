@@ -135,6 +135,20 @@ SECTIONS
 		__bss_end__ = .;
 	} > ram
 
+	/*
+	 * Zero-initialized data in the AHB SRAM bank (16 kB at 0x2007C000 on
+	 * all LPC175x/176x parts with >= 32 kB RAM).  Use the AHB_BSS
+	 * attribute from ubertooth.h.  Zeroed by Reset_Handler.
+	 */
+	.ahb_bss (NOLOAD) :
+	{
+		. = ALIGN(4);
+		_ahb_bss = .;
+		*(.ahb_bss .ahb_bss.*)
+		. = ALIGN(4);
+		_ahb_ebss = .;
+	} > ahbram
+
 	/* Where we put the heap with cr_clib */
 	.cr_heap :
 	{
@@ -145,5 +159,15 @@ SECTIONS
 
 	/* Leave room above stack for IAP to run */
 	_StackTop = ORIGIN(ram) + LENGTH(ram) - 32;
+
+	/*
+	 * The stack grows down from _StackTop towards the end of .bss in the
+	 * local SRAM.  Fail the link if less than _min_stack_size bytes are
+	 * left for it.  Off (0) unless a firmware sets it with
+	 * -Wl,--defsym=_min_stack_size=N.
+	 */
+	_min_stack_size = DEFINED(_min_stack_size) ? _min_stack_size : 0;
+	ASSERT(_StackTop - _ebss >= _min_stack_size,
+	       "not enough RAM left for the stack: move data to .ahb_bss")
 
 }

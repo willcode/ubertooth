@@ -16,6 +16,8 @@ static inline uint32_t irq_save_disable(void)
 	return primask;
 }
 
+/* common/ubertooth.h provides the same helper */
+#ifndef UBERTOOTH_HAVE_IRQ_HELPERS
 static inline void irq_restore(uint32_t primask)
 {
 	__asm__ __volatile__ (
@@ -24,5 +26,6 @@ static inline void irq_restore(uint32_t primask)
 	: "r"(primask)
 	: "memory");
 }
+#endif
 
 #endif

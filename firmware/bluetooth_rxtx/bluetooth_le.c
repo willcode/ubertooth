@@ -126,7 +126,7 @@ u32 btle_reverse_crc(u32 crc, u8 *data, int len) {
 	return ret;
 }
 
-u32 btle_crc_lut[256] = {
+static const u32 btle_crc_lut[256] = {
 	0x000000, 0x01b4c0, 0x036980, 0x02dd40, 0x06d300, 0x0767c0, 0x05ba80, 0x040e40,
 	0x0da600, 0x0c12c0, 0x0ecf80, 0x0f7b40, 0x0b7500, 0x0ac1c0, 0x081c80, 0x09a840,
 	0x1b4c00, 0x1af8c0, 0x182580, 0x199140, 0x1d9f00, 0x1c2bc0, 0x1ef680, 0x1f4240,
@@ -182,24 +182,68 @@ u32 btle_crcgen_lut(u32 crc_init, u8 *data, int len) {
 }
 
 /*
+ * whitening_byte[i] holds the 8 whitening bits whitening[i..i+7] packed
+ * LSB first (the first bit on air in bit 0).
+ */
+static const uint8_t whitening_byte[127] = {
+	0xaf, 0x57, 0xab, 0x55, 0x2a, 0x15, 0x0a, 0x85, 0x42, 0xa1, 0xd0, 0x68,
+	0xb4, 0xda, 0xed, 0xf6, 0x7b, 0x3d, 0x9e, 0xcf, 0xe7, 0x73, 0x39, 0x9c,
+	0x4e, 0xa7, 0x53, 0xa9, 0xd4, 0x6a, 0x35, 0x9a, 0xcd, 0x66, 0x33, 0x19,
+	0x0c, 0x06, 0x83, 0xc1, 0x60, 0xb0, 0xd8, 0x6c, 0xb6, 0x5b, 0xad, 0xd6,
+	0xeb, 0x75, 0xba, 0x5d, 0x2e, 0x17, 0x8b, 0xc5, 0x62, 0x31, 0x98, 0x4c,
+	0x26, 0x13, 0x89, 0x44, 0x22, 0x11, 0x08, 0x04, 0x02, 0x81, 0x40, 0x20,
+	0x90, 0x48, 0x24, 0x92, 0xc9, 0x64, 0xb2, 0x59, 0x2c, 0x96, 0xcb, 0xe5,
+	0xf2, 0x79, 0xbc, 0xde, 0xef, 0x77, 0x3b, 0x1d, 0x0e, 0x87, 0xc3, 0xe1,
+	0xf0, 0xf8, 0xfc, 0xfe, 0x7f, 0x3f, 0x1f, 0x8f, 0xc7, 0xe3, 0x71, 0xb8,
+	0xdc, 0x6e, 0x37, 0x1b, 0x8d, 0x46, 0xa3, 0x51, 0x28, 0x94, 0x4a, 0xa5,
+	0xd2, 0xe9, 0xf4, 0xfa, 0x7d, 0xbe, 0x5f,
+};
+
+static inline uint8_t rev8(uint8_t v) {
+	return (uint8_t)(rbit(v) >> 24);
+}
+
+/*
+ * Dewhiten and reverse the bit order of one byte received from the
+ * CC2400 (first bit on air in the MSB) at byte offset `offset` of a
+ * packet's PDU. Channel is a physical channel in the range [2402, 2480].
+ */
+uint8_t le_dewhiten_byte(unsigned channel, unsigned offset, uint8_t data) {
+	unsigned idx = (whitening_index[btle_channel_index(channel)] + 8 * offset) % 127;
+	return rev8(data) ^ whitening_byte[idx];
+}
+
+/*
  * Dewhiten and reverse the bit order of a buffer in place.
  * Channel is a physical channel in the range [2402, 2480]
- * TODO convert this to use whitening word
  */
 void le_dewhiten(uint8_t *data, unsigned size, unsigned channel) {
-	unsigned i, j, bit;
+	unsigned i;
 	unsigned idx = whitening_index[btle_channel_index(channel)];
 
 	for (i = 0; i < size; ++i) {
-		uint8_t out = 0;
-		for (j = 0; j < 8; ++j) {
-			bit = (data[i] >> (7-j)) & 1;
-			bit ^= whitening[idx];
-			idx = (idx + 1) % sizeof(whitening);
-			out |= bit << j;
-		}
-		data[i] = out;
+		data[i] = rev8(data[i]) ^ whitening_byte[idx];
+		idx += 8;
+		if (idx >= 127)
+			idx -= 127;
 	}
+}
+
+/* bit-reverse a 24 bit CRCInit for btle_crcgen_lut */
+uint32_t le_reverse_crc_init(uint32_t crc_init) {
+	return rbit(crc_init & 0xffffff) >> 8;
+}
+
+/*
+ * Check a dewhitened PDU (header + payload + 3 CRC bytes). size is the
+ * total length including CRC. Returns 1 if the CRC is valid.
+ */
+int le_crc_ok(uint32_t crc_init_reversed, const uint8_t *pdu, unsigned size) {
+	uint32_t wire;
+	if (size < 5)
+		return 0;
+	wire = pdu[size - 3] | (pdu[size - 2] << 8) | (pdu[size - 1] << 16);
+	return btle_crcgen_lut(crc_init_reversed, (u8 *)pdu, size - 3) == wire;
 }
 
 /*
@@ -239,4 +283,50 @@ uint8_t le_map_channel(uint8_t channel_idx, le_channel_remapping_t *remapping) {
 		return channel_idx;
 	else
 		return remapping->remapping_index[channel_idx % remapping->total_channels];
+}
+
+/*
+ * Channel Selection Algorithm #1 as a pure function of the connection
+ * event counter. The unmapped channel for event N is
+ * ((N + 1) * hopIncrement) mod 37, since lastUnmappedChannel starts at 0.
+ */
+uint8_t le_csa1_channel(uint16_t counter, uint8_t hop_increment,
+		le_channel_remapping_t *remapping) {
+	uint8_t unmapped = ((uint32_t)(counter + 1) * hop_increment) % 37;
+	return le_map_channel(unmapped, remapping);
+}
+
+/* bit-reverse each byte of a 16 bit value */
+static uint16_t csa2_perm(uint16_t v) {
+	uint32_t r = rbit(v); // reverses all 32 bits: byte n -> byte 3 - n
+	return (uint16_t)(((r >> 24) & 0xff) | ((r >> 8) & 0xff00));
+}
+
+static uint16_t csa2_mam(uint16_t a, uint16_t b) {
+	return (uint16_t)(17 * a + b);
+}
+
+/*
+ * Channel Selection Algorithm #2 (Core Spec v5.x Vol 6 Part B 4.5.8.3).
+ * Returns the unmapped event channel's pseudo random number prn_e.
+ */
+uint16_t le_csa2_prn_e(uint16_t counter, uint16_t channel_id) {
+	uint16_t prn = counter ^ channel_id;
+	int i;
+
+	for (i = 0; i < 3; ++i)
+		prn = csa2_mam(csa2_perm(prn), channel_id);
+
+	return prn ^ channel_id;
+}
+
+uint8_t le_csa2_channel(uint16_t counter, uint16_t channel_id,
+		le_channel_remapping_t *remapping) {
+	uint16_t prn_e = le_csa2_prn_e(counter, channel_id);
+	uint8_t unmapped = prn_e % 37;
+
+	if (remapping->channel_in_use[unmapped])
+		return unmapped;
+
+	return remapping->remapping_index[(remapping->total_channels * prn_e) >> 16];
 }

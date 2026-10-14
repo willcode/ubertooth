@@ -56,6 +56,8 @@ static const u8 ao_barker_correct[] = {
 */
 
 void precalc();
+void afh_update(void);
+int afh_channel_used(u16 channel);
 u16 next_hop(u32 clkn);
 int find_access_code(u8 *idle_rxbuf);
 

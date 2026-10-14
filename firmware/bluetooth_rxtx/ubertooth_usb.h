@@ -56,9 +56,12 @@
 typedef int (VendorRequestHandler)(u8 request, u16 *request_params, u8 *data, int *data_len);
 
 int ubertooth_usb_init(VendorRequestHandler *vendor_req_handler);
-void usb_queue_init();
-usb_pkt_rx *usb_enqueue();
-usb_pkt_rx *dequeue();
+void usb_queue_init(void);
+usb_pkt_rx *usb_enqueue(void);
+usb_pkt_rx *usb_enqueue_reserve(void);
+void usb_enqueue_commit(void);
+usb_pkt_rx *usb_dequeue_peek(void);
+void usb_dequeue_release(void);
 void handle_usb(u32 clkn);
 
 #endif /* __UBERTOOTH_USB_H */

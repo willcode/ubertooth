@@ -272,6 +272,12 @@ void cc2400_init()
 u32 cc2400_spi(u8 len, u32 data)
 {
 	u32 msb = 1 << (len - 1);
+	/*
+	 * The transaction must be atomic: ISRs (and USB vendor requests run
+	 * from the USB ISR) also talk to the CC2400, and a nested transaction
+	 * would merge into this one while CSN is low.
+	 */
+	uint32_t primask = irq_save();
 
 	/* start transaction by dropping CSN */
 	CSN_CLR;
@@ -292,6 +298,7 @@ u32 cc2400_spi(u8 len, u32 data)
 	/* end transaction by raising CSN */
 	CSN_SET;
 
+	irq_restore(primask);
 	return data;
 }
 
@@ -341,6 +348,7 @@ void cc2400_fifo_write(u8 len, u8 *data) {
 	u8 msb = 1 << 7;
 	u8 reg = FIFOREG;
 	u8 i, j, temp;
+	uint32_t primask = irq_save(); /* see cc2400_spi() */
 
 	/* start transaction by dropping CSN */
 	CSN_CLR;
@@ -377,6 +385,7 @@ void cc2400_fifo_write(u8 len, u8 *data) {
 	spi_delay();
 	/* end transaction by raising CSN */
 	CSN_SET;
+	irq_restore(primask);
 }
 
 /* read multiple bytes from SPI */
@@ -385,6 +394,14 @@ void cc2400_fifo_read(u8 len, u8 *buf) {
 	u8 i, j, temp, reg;
 	// Set first bit because it's a read
 	reg = 0x80 | FIFOREG;
+
+	/*
+	 * NOT atomic, unlike cc2400_spi()/cc2400_fifo_write(): with the
+	 * per-bit spi_delay() a 32 byte read takes several hundred us, longer
+	 * than one CLKN tick, so masking interrupts here would lose TIMER0
+	 * ticks.  Only call this while no ISR that touches the CC2400 is
+	 * enabled (currently only rx_generic_sync(), where USB is polled).
+	 */
 
 	/* start transaction by dropping CSN */
 	CSN_CLR;
@@ -468,7 +485,7 @@ void clock_start()
 	cc2400_reset();
 	cc2400_set(IOCFG, (GIO_CARRIER_SENSE_N << 9) | (GIO_CLK_16M << 3));
 	cc2400_strobe(SXOSCON);
-	while (!(cc2400_status() & XOSC16M_STABLE));
+	cc2400_wait_status(XOSC16M_STABLE, 1);
 
 	/* activate main oscillator */
 	SCS = SCS_OSCEN;
@@ -602,11 +619,11 @@ void cc2400_tune_tx(uint16_t channel)
 void cc2400_hop_rx(uint16_t channel)
 {
 	cc2400_strobe(SRFOFF);
-	while ((cc2400_status() & FS_LOCK));
+	cc2400_wait_status(FS_LOCK, 0);
 	cc2400_tune_rx(channel);
-	while (!(cc2400_status() & XOSC16M_STABLE));
+	cc2400_wait_status(XOSC16M_STABLE, 1);
 	cc2400_strobe(SFSON);
-	while (!(cc2400_status() & FS_LOCK));
+	cc2400_wait_status(FS_LOCK, 1);
 	cc2400_strobe(SRX);
 }
 
@@ -614,12 +631,12 @@ void cc2400_hop_rx(uint16_t channel)
 void cc2400_hop_tx(uint16_t channel)
 {
 	cc2400_strobe(SRFOFF);
-	while ((cc2400_status() & FS_LOCK));
-	cc2400_tune_rx(channel);
-	while (!(cc2400_status() & XOSC16M_STABLE));
+	cc2400_wait_status(FS_LOCK, 0);
+	cc2400_tune_tx(channel);
+	cc2400_wait_status(XOSC16M_STABLE, 1);
 	cc2400_strobe(SFSON);
-	while (!(cc2400_status() & FS_LOCK));
-	cc2400_strobe(SRX);
+	cc2400_wait_status(FS_LOCK, 1);
+	cc2400_strobe(STX);
 }
 
 void get_part_num(uint8_t *buffer, int *len)
@@ -673,3 +690,27 @@ void set_isp(void)
 
 //FIXME ssp
 //FIXME tx/rx
+
+int cc2400_wait_status(u8 mask, int set)
+{
+	/* each status read is an SPI transaction of a few microseconds */
+	for (unsigned i = 0; i < 2000; ++i) {
+		u8 st = cc2400_status();
+		if (set ? (st & mask) == mask : (st & mask) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+void wdt_reset_in(unsigned ms)
+{
+	uint32_t s;
+
+	WDCLKSEL = 0;          /* internal RC oscillator, 4 MHz */
+	WDTC = ms * 1000;      /* the counter runs at pclk/4 = 1 MHz */
+	WDMOD = WDMOD_WDEN | WDMOD_WDRESET;
+	s = irq_save();        /* the feed sequence must not be interrupted */
+	WDFEED = 0xAA;
+	WDFEED = 0x55;
+	irq_restore(s);
+}

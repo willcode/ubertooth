@@ -96,7 +96,14 @@ BOOL USBInit(void);
 
 /** Request handler callback (standard, vendor, class) */
 typedef BOOL (TFnHandleRequest)(TSetupPacket *pSetup, int *piLen, U8 **ppbData);
-void USBRegisterRequestHandler(int iType, TFnHandleRequest *pfnHandler, U8 *pbDataStore);
+void USBRegisterRequestHandlerSized(int iType, TFnHandleRequest *pfnHandler, U8 *pbDataStore, int iDataStoreLen);
+/**
+	Registers a request handler.  pbDataStore must be an array (not a
+	pointer): its size bounds the data stage of control transfers, and
+	requests with a larger wLength are stalled.
+ */
+#define USBRegisterRequestHandler(iType, pfnHandler, abDataStore) \
+	USBRegisterRequestHandlerSized((iType), (pfnHandler), (abDataStore), (int)sizeof(abDataStore))
 void USBRegisterCustomReqHandler(TFnHandleRequest *pfnHandler);
 
 /** Enable generation of OS Descriptors to allow for driverless WinUSB device install on Windows 

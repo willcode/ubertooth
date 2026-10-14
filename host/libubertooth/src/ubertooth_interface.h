@@ -25,7 +25,7 @@
 #include <stdint.h>
 
 // increment on every API change
-#define UBERTOOTH_API_VERSION 0x0107
+#define UBERTOOTH_API_VERSION 0x0108
 
 #define DMA_SIZE 50
 
@@ -114,6 +114,10 @@ enum ubertooth_usb_commands {
 	UBERTOOTH_LE_SET_ADV_DATA    = 71,
 	UBERTOOTH_RFCAT_SUBCMD       = 72,
 	UBERTOOTH_XMAS               = 73,
+	UBERTOOTH_LE_MONITOR         = 74,
+	UBERTOOTH_LE_FOLLOW_PARAMS   = 75,
+	UBERTOOTH_LE_ADV_CONFIG      = 76,
+	UBERTOOTH_LE_PROMISC_CONFIG  = 77,
 };
 
 enum rfcat24_subcommands {
@@ -145,6 +149,121 @@ enum usb_pkt_types {
 	SPECAN     = 4,
 	LE_PROMISC = 5,
 	EGO_PACKET = 6,
+	LE_STATE   = 7,  // LE connection following state change, see le_state_codes
+	LE_PACKET_CONT = 8, // continuation of a long LE_PACKET (data only)
+};
+
+/*
+ * LE_PACKET metadata (API 0x0108+). In LE follow mode (le_phy:
+ * ubertooth-btle -f/-n) the BR-only clkn_high byte carries flags and
+ * reserved[] carries the connection event counter (little endian) when
+ * LE_FLAG_COUNTER_VALID is set. clk100ns is then raw TIMER1 ticks
+ * (100 ns, wrapping at 2^32), also for LE_PACKET_CONT and LE_STATE.
+ * In LE promiscuous mode clkn_high is 0 and clk100ns is CLK100NS.
+ */
+enum le_packet_flags {
+	LE_FLAG_DATA          = 0x01, // data channel PDU of the followed connection
+	LE_FLAG_SLAVE         = 0x02, // sent by the slave (2nd, 4th.. packet in event)
+	LE_FLAG_ENCRYPTED     = 0x04, // connection is encrypted (payload is ciphertext)
+	LE_FLAG_TRUNCATED     = 0x08, // more data follows in LE_PACKET_CONT packets
+	LE_FLAG_COUNTER_VALID = 0x10, // reserved[0..1] holds the event counter
+	LE_FLAG_AUX           = 0x20, // received on a secondary adv channel (AuxPtr)
+	LE_FLAG_CRC_CHECKED   = 0x40, // firmware checked the CRC
+	LE_FLAG_CRC_OK        = 0x80, // ... and it was valid
+};
+
+/* first data byte of an LE_STATE packet */
+enum le_state_codes {
+	LE_STATE_CONN_START   = 0,  // le_state_conn_t follows
+	LE_STATE_CONN_LOST    = 1,  // reason (le_lost_reasons), u16 counter; for LE_LOST_PHY then m2s, s2m phy
+	LE_STATE_CSA_SWITCH   = 2,  // new csa (1/2), u16 counter
+	LE_STATE_CONN_UPDATE  = 3,  // u16 interval (1.25 ms), u16 timeout (10 ms), u16 instant
+	LE_STATE_CHMAP_UPDATE = 4,  // chm[5], u16 instant
+	LE_STATE_PHY_UPDATE   = 5,  // m2s phy, s2m phy, u16 instant
+	LE_STATE_ENC_START    = 6,  // u16 counter
+	LE_STATE_ENC_CTRL     = 7,  // encrypted LL control PDU: len, slave, guess (le_enc_ctrl_guess), u16 counter
+	LE_STATE_MAP_LEARN    = 8,  // chm[5] after removing an unused channel
+	LE_STATE_TERMINATE    = 9,  // error code, u16 counter (of the event it was seen in)
+	LE_STATE_ANCHOR       = 10, // first anchor acquired: u32 anchor, u16 counter
+	LE_STATE_USB_DROPS    = 11, // u32 packets dropped because the USB queue was full
+	LE_STATE_AUX          = 12, // AuxPtr seen: chan, AuxPHY (0 1M, 1 2M, 2 Coded; only 1M is followed), u32 offset_us, i16 slack_us (time left to retune; < 0: late)
+};
+
+enum le_lost_reasons {
+	LE_LOST_SUPERVISION = 0,
+	LE_LOST_CANCELED   = 1,
+	LE_LOST_PHY         = 2,  // followed by m2s, s2m phys (0, 0: unknown, the LL_PHY_UPDATE_IND was encrypted)
+	LE_LOST_TERMINATED  = 3,
+	LE_LOST_NEVER_SYNCED = 4,
+};
+
+enum le_enc_ctrl_guess {
+	LE_ENC_GUESS_UNKNOWN     = 0,
+	LE_ENC_GUESS_CONN_UPDATE = 1, // 12 + MIC
+	LE_ENC_GUESS_CHMAP       = 2, // 8 + MIC
+	LE_ENC_GUESS_PHY_UPDATE  = 3, // 5 + MIC (or LL_POWER_CHANGE_IND)
+	LE_ENC_GUESS_TERMINATE   = 4, // 2 + MIC
+	LE_ENC_GUESS_ONE_BYTE    = 5, // 1 + MIC: START_ENC_RSP, PING_REQ/RSP, PAUSE_ENC_*
+};
+
+/* LE_STATE_CONN_START payload */
+typedef struct {
+	uint32_t access_address;
+	uint32_t crc_init;      // 24 bits
+	uint16_t interval;      // 1.25 ms units
+	uint16_t latency;
+	uint16_t timeout;       // 10 ms units
+	uint8_t  chm[5];
+	uint8_t  hop;           // CSA#1 hop increment
+	uint8_t  csa;           // 1 or 2
+	uint8_t  flags;         // bit0: CSA chosen by guess (auto-detect active), bit1: from AUX_CONNECT_REQ, bit2: from host params
+	uint8_t  win_size;      // 1.25 ms units
+	uint8_t  sca;
+	uint16_t win_offset;    // 1.25 ms units
+} __attribute__((packed)) le_state_conn_t;
+
+/*
+ * UBERTOOTH_LE_FOLLOW_PARAMS (OUT, valid while in LE follow mode):
+ * start following a connection whose parameters were recovered by the
+ * host (promiscuous recovery or a hand-off from another radio).
+ */
+enum le_follow_param_flags {
+	LE_FOLLOW_MAP_LEARN       = 0x01, // learn the channel map from misses
+	LE_FOLLOW_COUNTER_UNKNOWN = 0x02, // counter only known mod 37 (CSA#1)
+};
+
+typedef struct {
+	uint32_t access_address;
+	uint32_t crc_init;      // 24 bits
+	uint32_t anchor;        // device time (100 ns ticks) of an observed anchor
+	uint16_t counter;       // connection event counter of that anchor
+	uint16_t interval;      // 1.25 ms units
+	uint16_t timeout;       // 10 ms units, 0 = 4 s
+	uint8_t  chm[5];
+	uint8_t  hop;           // CSA#1 hop increment
+	uint8_t  csa;           // 1 or 2
+	uint8_t  unmapped;      // CSA#1: unmapped channel of the anchor event
+	uint8_t  flags;         // le_follow_param_flags
+	uint8_t  sca;           // master sleep clock accuracy field (0-7)
+} __attribute__((packed)) le_follow_params_t;
+
+/*
+ * UBERTOOTH_LE_ADV_CONFIG: wValue = flags, wIndex = dwell time (ms) for
+ * advertising channel hopping (0 = default 100 ms)
+ */
+enum le_adv_config_flags {
+	LE_ADV_FOLLOW_AUX  = 0x01, // follow AuxPtr to secondary channels (LE 1M)
+	LE_ADV_HOP         = 0x02, // rotate 37 -> 38 -> 39
+	LE_ADV_HOP_ON_ADV  = 0x04, // hop right after each advertising PDU
+};
+
+/*
+ * UBERTOOTH_LE_PROMISC_CONFIG: wValue = minimum RSSI (dBm, int8 as
+ * uint8) for an access address to be selected, wIndex = flags
+ */
+enum le_promisc_config_flags {
+	LE_PROMISC_STRONGEST = 0x01, // pick the strongest qualifying AA
+	LE_PROMISC_AA_ONLY   = 0x02, // stop after reporting the AA (host recovers the rest)
 };
 
 enum hop_mode {

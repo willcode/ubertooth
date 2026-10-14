@@ -32,8 +32,7 @@
  */
 
 int enqueue_with_ts(u8 type, u8 *buf, u32 ts);
-#define CLK100NS (3125*(clkn & 0xfffff) + T0TC)
-extern volatile u32 clkn; // TODO: replace with timer1
+// clkn and CLK100NS come from ubertooth_clock.h (TODO: replace with timer1)
 extern volatile u8 requested_mode;
 extern volatile u16 channel;
 
@@ -70,9 +69,14 @@ typedef void (*ego_st_handler)(ego_fsm_state_t *);
 uint8_t packet_len = 18;
 #define EGO_MAX_PACKET_LEN 48
 typedef struct _ego_packet_t {
-	u8 rxbuf[EGO_MAX_PACKET_LEN];
+	/* enqueue_with_ts() copies DMA_SIZE bytes */
+	u8 rxbuf[DMA_SIZE > EGO_MAX_PACKET_LEN ? DMA_SIZE : EGO_MAX_PACKET_LEN];
 	u32 rxtime;
 } ego_packet_t;
+
+/* give up on a packet if no byte arrives for this long (100 ns units);
+ * one byte at 250 kbit/s takes 32 us */
+#define EGO_BYTE_TIMEOUT 10000
 
 static void ssp_start(void) {
 	// make sure the (active low) slave select signal is not active
@@ -125,22 +129,42 @@ static void rf_on(void) {
 	cc2400_set(SYNCH, (access_code >> 16) & 0xffff);
 	cc2400_set(SYNCL, (access_code >>  0) & 0xffff);
 
-	while (!(cc2400_status() & XOSC16M_STABLE));
+	cc2400_wait_status(XOSC16M_STABLE, 1);
 
 	ssp_start();
 
 	cc2400_strobe(SFSON);
-	while (!(cc2400_status() & FS_LOCK));
+	cc2400_wait_status(FS_LOCK, 1);
 	while ((cc2400_get(FSMSTATE) & 0x1f) != STATE_STROBE_FS_ON);
 
 	cc2400_strobe(SRX);
 }
 
+/* elapsed CLK100NS time since start, handling its wraparound */
+static u32 clk100ns_since(u32 start) {
+	u32 now = CLK100NS;
+	if (now < start)
+		now += 3276800000;
+	return now - start;
+}
+
+/* Receive up to packet_len bytes.  Stops early (rest of the buffer left
+ * zero) if the data stops coming or a different mode is requested. */
 static void do_rx(ego_packet_t *packet) {
 	int i;
-	for (i = 0; i < packet_len; i++) {
+	unsigned len = packet_len;
+
+	if (len > EGO_MAX_PACKET_LEN)
+		len = EGO_MAX_PACKET_LEN;
+
+	for (i = 0; i < (int)len; i++) {
+		u32 start = CLK100NS;
 		// make sure there are bytes ready
-		while (!(SSP1SR & SSPSR_RNE)) ;
+		while (!(SSP1SR & SSPSR_RNE)) {
+			if (clk100ns_since(start) > EGO_BYTE_TIMEOUT ||
+					requested_mode != MODE_EGO)
+				return;
+		}
 		packet->rxbuf[i] = (u8)DIO_SSP_DR;
 	}
 }
@@ -249,7 +273,7 @@ static void continuous_cap_state(ego_fsm_state_t *state) {
 		ssp_stop();
 		// restart cap with radio warm
 		cc2400_strobe(SFSON);
-		while (!(cc2400_status() & FS_LOCK));
+		cc2400_wait_status(FS_LOCK, 1);
 		while ((cc2400_get(FSMSTATE) & 0x1f) != STATE_STROBE_FS_ON);
 
 		while (SSP1SR & SSPSR_RNE) {
@@ -299,10 +323,10 @@ static void start_jamming_state(ego_fsm_state_t *state) {
 	cc2400_set(GRDEC,  3);       // 250 kbit
 	cc2400_set(FREND, 0xf);
 
-	while (!(cc2400_status() & XOSC16M_STABLE));
+	cc2400_wait_status(XOSC16M_STABLE, 1);
 
 	cc2400_strobe(SFSON);
-	while (!(cc2400_status() & FS_LOCK));
+	cc2400_wait_status(FS_LOCK, 1);
 	while ((cc2400_get(FSMSTATE) & 0x1f) != STATE_STROBE_FS_ON);
 
 #ifdef UBERTOOTH_ONE
@@ -424,9 +448,11 @@ int rfcat_subcommand(uint16_t cmd, uint8_t *body, int body_len) {
 		case RFCAT_SET_AA:
 			if (body_len < 1 || body_len > 4)
 				return 0;
+			// body[0] is the most significant byte; unused low
+			// bytes are zero (use the new length, not the old one)
 			for (i = 0; i < 4; ++i) {
 				access_code <<= 8;
-				if (i < access_code_len)
+				if (i < body_len)
 					access_code |= body[i];
 			}
 			access_code_len = body_len;
@@ -434,7 +460,9 @@ int rfcat_subcommand(uint16_t cmd, uint8_t *body, int body_len) {
 
 			// set length
 		case RFCAT_CAP_LEN:
-			if (body_len != 1)
+			// do_rx() writes packet_len bytes into a fixed buffer
+			if (body_len != 1 || body[0] == 0 ||
+					body[0] > EGO_MAX_PACKET_LEN)
 				return 0;
 			packet_len = body[0];
 			break;

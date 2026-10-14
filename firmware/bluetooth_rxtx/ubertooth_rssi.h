@@ -29,6 +29,7 @@ extern int8_t rssi_min;
 extern uint8_t rssi_count;
 
 void rssi_reset(void);
+void rssi_iir_reset(void);
 void rssi_add(int8_t v);
 void rssi_iir_update(uint16_t channel);
 int8_t rssi_get_avg(uint16_t channel);

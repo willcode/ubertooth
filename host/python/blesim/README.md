@@ -23,9 +23,19 @@ hackrf_transfer -t conn.iq -f 2431000000 -s 20000000 -x 16 -a 0
 The scenarios are `adv`, `extadv` (ADV_EXT_IND with an AuxPtr), `coded`
 (LE Coded advertising), `conn` (CONNECT_IND, then a hopping connection; add
 `--conn-update`, `--chmap-update`, `--encrypt` and `--phy2m` for the LL
-procedures), and
-`midconn` (a connection that is already running, for `ubertooth-btle -P`).
-`selftest` checks the encoder against the specification's test vectors.
+procedures, and `--forge-slave-update`, `--enc-ctrl6`, `--enc-ctrl9`,
+`--terminate` and `--fade` for what a follower must not be misled by), and
+`midconn` (a connection that is already running, for `ubertooth-btle -P`;
+`--conn-update` adds a plaintext update late in it). `selftest` checks the
+encoder against the specification's test vectors.
+
+`hackrf_transfer` must keep up with 2 bytes per sample, 40 MB/s at 20 Msps.
+On a busy host it falls behind and the HackRF sends silence in the middle
+of packets, which looks like bad reception (its summary then shows less
+than 40 MB/second); the start of a transmission can be lost the same way.
+Use a lower rate with data channels that fit it, for example
+`--fc 2428 --fs 8e6 --chm 11,12` and `hackrf_transfer -f 2428000000 -s 8000000`,
+and start the receiver first.
 
 The HackRF is a transmitter. Use low gain (`-x`), short runs, and only where
 transmitting in the 2.4 GHz ISM band is permitted.

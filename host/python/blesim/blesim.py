@@ -453,7 +453,8 @@ def scenario_conn(tl, args):
     rnd = random.Random(args.seed)
     aa = args.aa if args.aa is not None else rnd.getrandbits(32)
     crc_init = rnd.getrandbits(24)
-    chans = WINDOW_DATA_CHANNELS
+    chans = ([int(c) for c in args.chm.split(',')] if args.chm
+             else WINDOW_DATA_CHANNELS)
     chm = chm_from_list(chans)
     hop = args.hop
     interval = args.interval  # units of 1.25 ms
@@ -545,6 +546,13 @@ def scenario_conn(tl, args):
         # an encrypted 6-byte LL control PDU (LL_UNKNOWN_RSP, LL_REJECT_IND,
         # ... have the length of LL_TERMINATE_IND) while traffic goes on
         script[c + 26] = (b'', 1, bytes([0x07, 0x00]), 3, 'encrypted 6-byte LL control')
+    if args.enc_ctrl9 and args.encrypt:
+        # encrypted 9-byte LL control PDUs from the central, the length of
+        # LL_PHY_UPDATE_IND (LL_POWER_CHANGE_IND has it too), the PHY
+        # unchanged; random bytes, as ciphertext is
+        for k in (28, 32, 36):
+            script[c + k] = (bytes(rnd.getrandbits(8) for _ in range(5)), 3, b'', 1,
+                             'encrypted 9-byte LL control from the central')
     if args.phy2m:
         at = c + 30
         inst = at + 6
@@ -552,6 +560,7 @@ def scenario_conn(tl, args):
                       b'', 1, 'LL_PHY_UPDATE_IND 2M @%d' % inst)
         pending.append((inst, 'phy', '2M'))
 
+    fade = [int(x) for x in args.fade.split(':')] if args.fade else None
     while counter < args.events:
         # apply instants
         for inst, kind, val in list(pending):
@@ -576,11 +585,14 @@ def scenario_conn(tl, args):
         if encrypted:
             pm_pl, ps_pl = mic(pm_pl), mic(ps_pl)
         pm, ps = m_s(pm_pl, ps_pl, llid_m, llid_s)
-        tl.add(anchor, ch, aa, pm, crc_init, phy=phy,
-               note='M ev=%d ch=%d %s' % (counter, ch, note))
-        ts = anchor + tl.duration_us(len(pm), phy) + 150
-        tl.add(ts, ch, aa, ps, crc_init, phy=phy,
-               note='S ev=%d ch=%d' % (counter, ch))
+        if fade and fade[0] <= counter < fade[1]:
+            pass  # neither side heard (the link goes on; the receiver hears nothing)
+        else:
+            tl.add(anchor, ch, aa, pm, crc_init, phy=phy,
+                   note='M ev=%d ch=%d %s' % (counter, ch, note))
+            ts = anchor + tl.duration_us(len(pm), phy) + 150
+            tl.add(ts, ch, aa, ps, crc_init, phy=phy,
+                   note='S ev=%d ch=%d' % (counter, ch))
         if enc_at is not None and counter == enc_at + 2:
             encrypted = True
         anchor += interval_us
@@ -593,8 +605,11 @@ def scenario_conn(tl, args):
 
 def scenario_midconn(tl, args):
     """An established connection (no CONNECT_IND): for promiscuous
-    recovery. Random event counter / CSA#1 phase; the channel map is the
-    channels inside the HackRF window (or --chm)."""
+    recovery. Random event counter (CSA#1's phase follows it); the channel
+    map is the channels inside the HackRF window (or --chm). With
+    --conn-update, a plaintext LL_CONNECTION_UPDATE_IND at 85% of the
+    duration, instant 8 events later: a follower that recovered the
+    counter wrongly applies it at the wrong event."""
     rnd = random.Random(args.seed)
     aa = args.aa if args.aa is not None else rnd.getrandbits(32)
     crc_init = rnd.getrandbits(24)
@@ -602,21 +617,39 @@ def scenario_midconn(tl, args):
              else WINDOW_DATA_CHANNELS)
     chm = chm_from_list(chans)
     counter = rnd.getrandbits(16)
-    last_unmapped = rnd.randint(0, 36)
+    # CSA#1's phase follows the counter: lastUnmappedChannel is 0 before
+    # event 0
+    last_unmapped = counter * args.hop % 37
     interval_us = args.interval * 1250
     t = 1000.0
     sn = nesn = 0
     first = None
-    for k in range(int(args.duration * 1e6 / interval_us)):
+    n = int(args.duration * 1e6 / interval_us)
+    upd_at = int(n * 0.85) if args.conn_update else None
+    upd_instant = None
+    for k in range(n):
         c = (counter + k) & 0xffff
+        if upd_instant is not None and c == upd_instant:
+            # WinOffset 0: the transmit window opens at the anchor the old
+            # interval gives; the central sends 600 us into it (as in conn)
+            t += 600
+            interval_us = args.conn_update * 1250
         if args.csa == 2:
             ch = csa2(c, aa, chm)
         else:
             last_unmapped, ch = csa1(last_unmapped, args.hop, chm)
         pl = bytes([rnd.getrandbits(8) for _ in range(rnd.choice([0, 0, 0, 4, 12]))])
-        pm = data_pdu(2 if pl else 1, pl, nesn, sn)
+        llid = 2 if pl else 1
+        note = ''
+        if k == upd_at:
+            upd_instant = (c + 8) & 0xffff
+            pl = bytes([0x00, 1]) + struct.pack('<HHHHH', 0, args.conn_update, 0,
+                                                  args.timeout, upd_instant)
+            llid = 3
+            note = ' LL_CONNECTION_UPDATE_IND int=%d @%d' % (args.conn_update, upd_instant)
+        pm = data_pdu(llid, pl, nesn, sn)
         ps = data_pdu(1, b'', sn ^ 1, nesn)
-        tl.add(t, ch, aa, pm, crc_init, note='M ev=%d ch=%d' % (c, ch))
+        tl.add(t, ch, aa, pm, crc_init, note='M ev=%d ch=%d%s' % (c, ch, note))
         tl.add(t + tl.duration_us(len(pm), '1M') + 150, ch, aa, ps, crc_init,
                note='S ev=%d ch=%d' % (c, ch))
         sn ^= 1
@@ -674,7 +707,8 @@ def main():
     ap.add_argument('--timeout', type=int, default=200, help='10 ms units')
     ap.add_argument('--events', type=int, default=200)
     ap.add_argument('--conn-update', type=int, default=0,
-                    help='new interval for an LL_CONNECTION_UPDATE_IND')
+                    help='new interval for an LL_CONNECTION_UPDATE_IND (conn; midconn: at 85%% '
+                         'of the duration)')
     ap.add_argument('--chmap-update', type=int, default=0,
                     help='shrink channel map to this many channels')
     ap.add_argument('--encrypt', action='store_true')
@@ -684,12 +718,18 @@ def main():
                     help='an LL_CONNECTION_UPDATE_IND from the peripheral (ignored by the link)')
     ap.add_argument('--enc-ctrl6', action='store_true',
                     help='with --encrypt: an encrypted 6-byte LL control PDU, traffic continuing')
+    ap.add_argument('--enc-ctrl9', action='store_true',
+                    help='with --encrypt: encrypted 9-byte LL control PDUs from the central '
+                         '(the length of LL_PHY_UPDATE_IND) at events 31, 35 and 39, the PHY unchanged')
+    ap.add_argument('--fade', default=None, metavar='A:B',
+                    help='conn: no packets in events A to B-1, as in a fade')
     ap.add_argument('--phy2m', action='store_true')
     ap.add_argument('--coding', type=int, choices=(2, 8), default=8)
     ap.add_argument('--aa', type=lambda s: int(s, 16), default=None)
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--duration', type=float, default=60.0, help='midconn: seconds')
-    ap.add_argument('--chm', default=None, help='midconn: comma separated data channels')
+    ap.add_argument('--chm', default=None,
+                    help='conn, midconn: comma separated data channels (they must fit in --fs)')
     args = ap.parse_args()
 
     if args.scenario == 'selftest':

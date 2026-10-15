@@ -141,7 +141,8 @@ def align_common(ut, hk):
 
 def align_lattice(conn, csa, anchor0_ns, interval_ns, hk):
     """Align on the event lattice: vote for offsets that put HackRF packets
-    on an event whose channel matches. Returns (a, 1.0, votes) or None."""
+    on an event whose channel matches. Returns (a, 1000.0, votes) or None:
+    Ubertooth ns = a + 1000 * HackRF us, the clocks' ratio taken as exact."""
     votes = collections.Counter()
     data = [h for h in hk if h['aa'] == '%08x' % conn['aa']]
     if not data:
@@ -158,7 +159,7 @@ def align_lattice(conn, csa, anchor0_ns, interval_ns, hk):
     if not votes:
         return None
     best, n = votes.most_common(1)[0]
-    return best * 20e3, 1.0, n
+    return best * 20e3, 1000.0, n
 
 
 def track_events(conn, csa, pkts, win_start, interval_ns):
@@ -361,8 +362,11 @@ def summarize(conn, csa, how, support, drift, pkts, events, enc_from, phy_change
     out.append('connection  AA %08x  CRCInit %06x  interval %.2f ms  CSA#%d  map %d channels'
                % (conn['aa'], conn['crc_init'], conn['interval'] * 1.25, csa,
                   len(blesim.used_channels(conn['chm']))))
-    out.append('alignment   %s (%d votes/packets), HackRF clock %+.1f ppm vs Ubertooth'
-               % (how, support, (drift - 1000.0) / 1000.0 * 1e6 if drift > 100 else (drift - 1) * 1e6))
+    if how == 'shared packets':
+        out.append('alignment   %s (%d packets), HackRF clock %+.1f ppm vs Ubertooth'
+                   % (how, support, (drift - 1000.0) / 1000.0 * 1e6))
+    else:
+        out.append('alignment   %s (%d votes), clock ratio assumed exact' % (how, support))
     if how == 'shared packets' and getattr(align_common, 'residual_ns', None):
         out.append('            residual rms %.2f us, max %.2f us' % (
             align_common.residual_ns[0] / 1e3, align_common.residual_ns[1] / 1e3))

@@ -252,8 +252,10 @@ static int recover_try_solve(ubertooth_t* ut, recover_state_t* st, const uint8_t
 
 	if (votes < 2)
 		return 0;
-	if (!st->interval)
-		st->interval = le_recover_interval(&st->rec, 6);
+	/* from every event so far, at each attempt: the first few gaps can
+	 * share a factor and give a multiple of the interval, which later
+	 * gaps break */
+	st->interval = le_recover_interval(&st->rec, 6);
 	if (!st->interval)
 		return 0;
 

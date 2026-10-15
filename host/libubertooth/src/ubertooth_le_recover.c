@@ -156,6 +156,15 @@ static uint32_t gap_events(uint32_t gap, uint32_t interval_ticks) {
 #define SLAVE_DELAY_MIN (230 * TICKS_PER_USEC)
 #define SLAVE_DELAY_MAX (2500 * TICKS_PER_USEC)
 
+/* x^-1 mod 37 (x not a multiple of 37) */
+static unsigned inverse37(unsigned x) {
+	unsigned y;
+	for (y = 1; y < 37; ++y)
+		if (x * y % 37 == 1)
+			return y;
+	return 0;
+}
+
 static int certain(const le_recover_event_t *e) {
 	return e->packets >= 2;
 }
@@ -515,8 +524,12 @@ static int solve(const le_recover_t *r, uint16_t interval, const uint8_t chm[5],
 				p->csa = 1;
 				p->hop = s1.a;
 				p->unmapped = (s1.b + (uint64_t)offsets[last] * s1.a) % 37;
-				// only the counter mod 37 is known; instants fix the rest
-				p->counter = offsets[last];
+				// lastUnmappedChannel starts at 0, so event c's unmapped
+				// channel is (c + 1) * hop mod 37: that gives the counter
+				// mod 37 and the first instant the rest. Exact for links
+				// younger than 65536 events: each counter wrap moves the
+				// counter by 65536 mod 37 = 9 against the channels
+				p->counter = (p->unmapped * inverse37(s1.a) + 36) % 37;
 				p->flags |= LE_FOLLOW_COUNTER_UNKNOWN;
 				p->interval = iv;
 				quality.csa = 1;

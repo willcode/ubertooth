@@ -56,8 +56,8 @@ static int run(const char *path) {
 	if (csa == 2)
 		ok &= p.counter == counter;
 	else
-		ok &= p.hop == hop && p.unmapped == unmapped;
-	printf("%s\n", ok ? "PASS" : "FAIL");
+		ok &= p.hop == hop && p.unmapped == unmapped && p.counter == counter % 37;
+	printf("%s [got hop %u unmapped %u counter %u]\n", ok ? "PASS" : "FAIL", p.hop, p.unmapped, p.counter);
 	return ok;
 }
 

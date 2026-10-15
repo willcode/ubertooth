@@ -20,7 +20,9 @@ def case(name, csa, interval, chans, seed, loss=0.1, ppm=40, t1=8.0, t2=6.0, mas
     c1 = rnd.choice(used)
     c2 = rnd.choice([c for c in used if c != c1])
     counter0 = rnd.getrandbits(16)
-    last_unmapped = rnd.randint(0, 36)
+    # lastUnmappedChannel is 0 before event 0, so before event counter0
+    # it is counter0 * hop mod 37
+    last_unmapped = counter0 * hop % 37
     t = rnd.randint(0, 10**6)            # device ticks (100 ns)
     iv = interval * 12500
     lines = []
@@ -37,12 +39,15 @@ def case(name, csa, interval, chans, seed, loss=0.1, ppm=40, t1=8.0, t2=6.0, mas
         if ch == mon and rnd.random() > loss:
             jitter = rnd.randint(-15, 15)
             drop_master = rnd.random() < master_loss
+            # the master's empty PDU, then the slave's reply T_IFS after
+            # its end: (8 + 2) bytes at 1 us per bit, plus 150 us
+            reply_delay = ((8 + 2) * 8 + 150) * 10
             for k, payload in enumerate([b'', bytes([rnd.getrandbits(8) for _ in range(rnd.randint(0, 8))])]):
                 if k == 0 and drop_master:
                     continue  # missed master packet: only the slave's reply
                 pdu = blesim.data_pdu(1 if not payload else 2, payload, k, ev & 1)
                 pkt = pdu + blesim.crc24(crc_init, pdu)
-                ts = int(t + jitter + k * (80 + 150 + len(pdu) * 80))
+                ts = int(t + jitter + k * reply_delay)
                 lines.append('%d %d %s' % (ts & 0xffffffff, ch, pkt.hex()))
             # the solver anchors on the last event with an exact anchor
             # (master packet seen)

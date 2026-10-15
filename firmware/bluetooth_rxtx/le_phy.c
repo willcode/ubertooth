@@ -68,6 +68,12 @@
 // Traffic for TERMINATE_WAIT_EVENTS events means it was something else,
 // or forged.
 #define TERMINATE_DEAF_EVENTS 3
+
+// Events after an encrypted PDU that looks like LL_PHY_UPDATE_IND within
+// which silence means a PHY change: the central gives the peripheral at
+// least 6 events it listens to before the instant (latency + 1 apart),
+// with some to spare
+#define ENC_PHY_SPARE_EVENTS 16
 #define TERMINATE_WAIT_EVENTS 8
 
 // transmitWindowDelay (Core Spec Vol 6 Part B 4.5.3)
@@ -221,6 +227,10 @@ typedef struct _le_conn_t {
 	uint8_t  miss_count[37];
 } le_conn_t;
 le_conn_t conn = { 0, };
+
+static uint16_t enc_phy_window(void) {
+	return 6 * (conn.latency + 1) + ENC_PHY_SPARE_EVENTS;
+}
 
 // connection event state
 typedef enum { EV_IDLE, EV_WAIT_OPEN, EV_OPEN } ev_state_t;
@@ -549,12 +559,18 @@ static void finish_conn_event(void) {
 				++conn.miss_count[ch] >= MAP_LEARN_MISSES)
 			map_learn_remove(ch);
 
-		// an encrypted LL_PHY_UPDATE_IND (instant >= 6 events later)
-		// followed by silence: the link moved to a PHY we can't receive
-		if (conn.enc_phy_hint && conn.deaf_events + 1 >= 4 &&
-				(uint16_t)(conn.conn_event_counter - conn.enc_phy_counter) >= 6) {
-			conn_lost(LE_LOST_PHY, 0, 0);
-			return;
+		// an encrypted LL_PHY_UPDATE_IND followed by silence from its
+		// instant: the link moved to a PHY we can't receive. The instant
+		// is at least 6 events later; silence that starts after any likely
+		// instant is a fade, and the hint expires
+		if (conn.enc_phy_hint) {
+			uint16_t since = conn.conn_event_counter - conn.enc_phy_counter;
+			if ((uint16_t)(since - conn.deaf_events) > enc_phy_window()) {
+				conn.enc_phy_hint = 0;
+			} else if (conn.deaf_events + 1 >= 4 && since >= 6) {
+				conn_lost(LE_LOST_PHY, 0, 0);
+				return;
+			}
 		}
 		++conn.deaf_events;
 

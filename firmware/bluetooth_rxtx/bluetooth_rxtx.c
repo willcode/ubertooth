@@ -891,29 +891,15 @@ void TIMER0_IRQHandler()
 		}
 
 		/*
-		 * Length of the CLKN tick that has just started, in 100 ns units:
-		 *   offset 0           -> 3125 (nominal)
-		 *   offset 1..3124     -> 3125 + offset (delay the clock)
-		 *   offset 3125..6249  -> 3125 - (6250 - offset) (advance it)
-		 * Advancing is done by shortening this tick.  (It used to be
-		 * done by stretching the tick to ~3 ticks and adding 2 to clkn
-		 * up front, which mis-timed one hop per correction.)  T0MR0 must
-		 * stay ahead of T0TC, which is already counting this tick.
+		 * The length of the CLKN tick that has just started, from the
+		 * pending trim (clkn_tick_match()).  Advancing the clock
+		 * shortens this tick; stretching it to ~3 ticks and adding 2
+		 * to clkn up front would mis-time one hop per correction.
 		 */
 		{
-			uint32_t off = clk100ns_offset;
-			uint32_t mr0 = 3124;
+			const uint32_t off = clk100ns_offset;
 			clk100ns_offset = 0;
-
-			if (off > 0 && off <= 3124) {
-				mr0 = 3124 + off;
-			} else if (off > 3124 && off < 6250) {
-				uint32_t min_mr0 = T0TC + 16;
-				mr0 = 3124 - (6250 - off);
-				if (mr0 < min_mr0)
-					mr0 = min_mr0;
-			}
-			T0MR0 = mr0;
+			T0MR0 = clkn_tick_match(off, T0TC);
 		}
 
 		/* Ack interrupt */

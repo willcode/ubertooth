@@ -74,6 +74,34 @@ static inline uint32_t clk100ns_read(void)
 	return 3125 * (c & 0xfffff) + t;
 }
 
+/*
+ * The T0MR0 match value for the CLKN tick that has just started, from the
+ * pending trim and the count already into the tick.  The tick's length in
+ * 100 ns units:
+ *   offset 0           -> 3125 (nominal)
+ *   offset 1..3124     -> 3125 + offset (delay the clock)
+ *   offset 3125..6249  -> 3125 - (6250 - offset) (advance it)
+ * The match value is one less than the length and must stay ahead of the
+ * count, so a shortened tick ends no sooner than 16 counts from now.  The
+ * shortened length is computed signed: 3125 asks for a tick of length 0,
+ * and 3124 - 3125 in unsigned arithmetic would wrap to 0xFFFFFFFF, pass
+ * the clamp and stop the clock until the counter wraps (about 429 s).
+ */
+static inline uint32_t clkn_tick_match(uint32_t offset, uint32_t count)
+{
+	int32_t mr0 = 3124;
+
+	if (offset > 0 && offset <= 3124) {
+		mr0 = 3124 + offset;
+	} else if (offset > 3124 && offset < 6250) {
+		const int32_t min_mr0 = count + 16;
+		mr0 = 3124 - (int32_t)(6250 - offset);
+		if (mr0 < min_mr0)
+			mr0 = min_mr0;
+	}
+	return mr0;
+}
+
 #define CLK100NS (clk100ns_read())
 #define LE_BASECLK (12500)                    // 1.25 ms in units of 100ns
 

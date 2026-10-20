@@ -21,3 +21,12 @@ if(Python3_FOUND)
 	set_tests_properties(btle_reassembly PROPERTIES
 		PASS_REGULAR_EXPRESSION "251 bytes.*")
 endif()
+
+# the HackRF Pro backend's LE search on a synthetic word stream (no libhackrf
+# needed: the search does not use it)
+add_executable(test_hackrf_le test_hackrf_le.c ${CMAKE_CURRENT_SOURCE_DIR}/../src/ubertooth_hackrf_le.c)
+target_include_directories(test_hackrf_le PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+if(Python3_FOUND)
+	add_test(NAME hackrf_le COMMAND sh -c
+		"${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_hle_words.py hle.u16 hle.txt && $<TARGET_FILE:test_hackrf_le> hle.u16 hle.txt 2409 80")
+endif()

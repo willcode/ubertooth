@@ -12,6 +12,13 @@
  * time t lands about 0.7 ms later. Banks within 2 ms of a landing are
  * dropped; later banks carry the new center.
  *
+ * LE (ubertooth-btle -n or -f): the same decisions on the window's even
+ * channels are LE 1M bits. ubertooth_hackrf_le.c searches them for
+ * advertising packets and for the packets of connections whose CONNECT_IND
+ * it saw, and each becomes an LE_PACKET (plus LE_PACKET_CONT) as the
+ * firmware sends in follow mode. The window does not hop: connections are
+ * captured on its data channels, not followed.
+ *
  * Device handling: a HackRF Pro qualifies when its firmware has the RAM
  * gateware loader (vendor requests 70-79 of the praline-ram-fpga and
  * praline-apps branches) and the gateware pack is installed. Selecting it
@@ -35,14 +42,20 @@
 
 #include "ubertooth.h"
 #include "ubertooth_hackrf.h"
+#include "ubertooth_hackrf_le.h"
 
 #define BR_KIND            0x4C     /* gateware identity kind of the BR image */
 #define REG_MODE           6        /* 0x80: BR words; bits 4-6 leak margin, 0-3 threshold */
+#define REG_LE_THR         4        /* bit 0: LE's slower decision threshold (images that
+                                       have it; others leave the register unused) */
 #define SAMPLE_RATE        16000000
 #define BANK               400
 #define RETUNE_LAND_NS     700000LL /* measured on a HackRF Pro: 0.65-0.81 ms after the request */
 #define RETUNE_GUARD       2000     /* words dropped either side of a landing */
 #define MAX_EVENTS         64
+#define LE_CENTER_MIN      2409     /* LE windows stay inside the band: 2402-2416 */
+#define LE_CENTER_MAX      2473     /* ... and 2466-2480 */
+#define LE_AA_ERRORS       2        /* access address bits that may differ */
 
 /* USB: HackRF IDs and the vendor requests used here */
 #define HACKRF_VID         0x1d50
@@ -81,6 +94,11 @@ static struct {
 	int scan_ms, afh;
 	int want_scan;          /* sweep requested (channel 9999, AFH mode, or SCAN_MS) */
 	uint8_t mode;           /* REG_MODE value while streaming */
+	int le;                 /* LE mode: the even channels' bits searched for LE packets */
+	int le_aa_errors;
+	int le_correct;         /* correct one bit error from the CRC */
+	int le_center;          /* LE window center (MHz) instead of the tool's channel, or 0 */
+	int le_thr;             /* LE mode: the gateware's slower decision threshold */
 
 	volatile int streaming;
 	int scanning;
@@ -223,7 +241,7 @@ int ubertooth_hackrf_describe(int n, char* buf, size_t len)
 	r = find_pro(ctx, n, NULL, NULL, NULL, serial, sizeof(serial));
 	libusb_exit(ctx);
 	if (r == 0)
-		snprintf(buf, len, "HackRF Pro     serial %s  BR channelizer, 15 channels",
+		snprintf(buf, len, "HackRF Pro     serial %s  BR channelizer, 15 channels (BR, LE 1M)",
 		         serial[0] ? serial : "unknown");
 	return r;
 }
@@ -368,6 +386,38 @@ int ubertooth_hackrf_active(void)
 	return H.open;
 }
 
+/* An LE packet as the firmware sends it in follow mode: T1 time base (100 ns
+ * ticks, wrapping at 2^32), flags in clkn_high, AA and PDU split into
+ * LE_PACKET + LE_PACKET_CONT records. No RSSI: the words carry decisions
+ * only. */
+static void emit_le(void* user, const hle_packet* p)
+{
+	uint8_t flags = LE_FLAG_CRC_CHECKED | LE_FLAG_CRC_OK;
+	/* the firmware stamps the preamble's start, 8 symbols before the access
+	 * address */
+	uint32_t ts = (uint32_t)((p->word >= 8 ? p->word - 8 : 0) * 10);
+	unsigned off, chunk, i;
+	(void)user;
+
+	if (p->is_data)
+		flags |= LE_FLAG_DATA | (p->slave ? LE_FLAG_SLAVE : 0);
+	if (p->aux)
+		flags |= LE_FLAG_AUX;
+	if (p->len > DMA_SIZE)
+		flags |= LE_FLAG_TRUNCATED;
+	for (off = 0, chunk = 0; off < p->len; off += DMA_SIZE, chunk++) {
+		usb_pkt_rx f;
+		memset(&f, 0, sizeof(f));
+		f.pkt_type = chunk == 0 ? LE_PACKET : LE_PACKET_CONT;
+		f.clkn_high = chunk == 0 ? flags : (uint8_t)chunk;
+		f.channel = (uint8_t)(p->freq - 2402);
+		f.clk100ns = htole32(ts);
+		for (i = 0; i < DMA_SIZE && off + i < p->len; i++)
+			f.data[i] = p->data[off + i];
+		fifo_push(H.ut->fifo, &f);
+	}
+}
+
 static void emit_bank(void)
 {
 	uint64_t start = H.bank_start, end = start + BANK;
@@ -393,6 +443,10 @@ static void emit_bank(void)
 	H.banks++;
 	if (drop) {
 		H.banks_dropped++;
+		return;
+	}
+	if (H.le) {
+		hle_bank(H.bank, BANK, start, center);
 		return;
 	}
 
@@ -606,6 +660,19 @@ int ubertooth_hackrf_open(void* arg, int n)
 	H.scan_ms = scan ? atoi(scan) : 0;
 	H.want_scan = H.scan_ms > 0;
 	H.afh = 0;
+	H.le = 0;
+	H.le_aa_errors = getenv("UBERTOOTH_HACKRF_LE_AA_ERRORS") ?
+	                 atoi(getenv("UBERTOOTH_HACKRF_LE_AA_ERRORS")) : LE_AA_ERRORS;
+	H.le_correct = getenv("UBERTOOTH_HACKRF_LE_CORRECT") ?
+	               atoi(getenv("UBERTOOTH_HACKRF_LE_CORRECT")) : 1;
+	H.le_thr = getenv("UBERTOOTH_HACKRF_LE_THRESHOLD") ?
+	           atoi(getenv("UBERTOOTH_HACKRF_LE_THRESHOLD")) : 1;
+	H.le_center = getenv("UBERTOOTH_HACKRF_LE_CENTER") ?
+	              atoi(getenv("UBERTOOTH_HACKRF_LE_CENTER")) : 0;
+	if (H.le_center && (H.le_center < 2402 || H.le_center > 2480)) {
+		fprintf(stderr, "UBERTOOTH_HACKRF_LE_CENTER must be 2402-2480 (MHz)\n");
+		goto fail_dev;
+	}
 	H.ut = ut;
 	H.center = H.base_center = 2441;
 	if (getenv("UBERTOOTH_HACKRF_CENTER")) {
@@ -669,8 +736,15 @@ int ubertooth_hackrf_stream_start(void)
 	H.base_center = H.center;
 	H.nev = 0;
 	pthread_mutex_unlock(&H.lock);
+	if (H.le)
+		hle_init(emit_le, NULL, H.le_aa_errors, H.le_correct);
 
-	r = hackrf_fpga_write_register(H.dev, REG_MODE, H.mode);
+	/* the threshold follows the data within a packet. A legacy
+	 * advertisement's CRC covers up to 312 bits, and one wrong bit fails the
+	 * packet: LE takes the slower threshold */
+	r = hackrf_fpga_write_register(H.dev, REG_LE_THR, H.le && H.le_thr ? 1 : 0);
+	if (r == HACKRF_SUCCESS)
+		r = hackrf_fpga_write_register(H.dev, REG_MODE, H.mode);
 	if (r != HACKRF_SUCCESS) {
 		fprintf(stderr, "could not select BR mode: %s\n", hackrf_error_name(r));
 		return -1;
@@ -698,6 +772,15 @@ void ubertooth_hackrf_stream_stop(void)
 	if (H.banks_dropped)
 		fprintf(stderr, "HackRF: %lu of %lu banks (%.1f%%) discarded at retunes\n",
 		        H.banks_dropped, H.banks, 100.0 * H.banks_dropped / (H.banks ? H.banks : 1));
+	if (H.le) {
+		hle_stats s;
+		hle_get_stats(&s);
+		fprintf(stderr, "HackRF LE: %lu access address matches, %lu packets with a good CRC "
+		        "(%lu of them corrected; %lu/%lu/%lu/%lu with 0/1/2/3 access address errors), "
+		        "%lu with a bad CRC, %lu connections taken up\n",
+		        s.matches, s.crc_ok, s.corrected, s.aa_err_hist[0], s.aa_err_hist[1],
+		        s.aa_err_hist[2], s.aa_err_hist[3], s.crc_bad, s.connections);
+	}
 }
 
 void ubertooth_hackrf_close(void* arg)
@@ -707,6 +790,7 @@ void ubertooth_hackrf_close(void* arg)
 		return;
 	ubertooth_hackrf_stream_stop();
 	hackrf_fpga_write_register(H.dev, REG_MODE, 0);
+	hackrf_fpga_write_register(H.dev, REG_LE_THR, 0);
 	hackrf_close(H.dev);
 	H.dev = NULL;
 	hackrf_exit();
@@ -720,12 +804,26 @@ void ubertooth_hackrf_close(void* arg)
 	H.uctx = NULL;
 }
 
+/* BR or LE. A change while streaming restarts the stream, which sets up the
+ * search and the threshold for the new mode. */
+static int set_le(int le)
+{
+	if (H.le == le)
+		return 0;
+	H.le = le;
+	if (!H.streaming)
+		return 0;
+	ubertooth_hackrf_stream_stop();
+	return ubertooth_hackrf_stream_start() == 0 ? 0 : LIBUSB_ERROR_IO;
+}
+
 /* A mode the HackRF Pro cannot do: say so once, and stop the tool's
  * receive loop (not every tool checks the result) */
 static int refuse_mode(void)
 {
 	if (!H.ut->stop_ubertooth)
-		fprintf(stderr, "HackRF backend: the HackRF Pro receives Bluetooth BR only; "
+		fprintf(stderr, "HackRF backend: the HackRF Pro receives Bluetooth BR, and LE 1M "
+		        "advertising and connections in its window (ubertooth-btle -n or -f); "
 		        "this mode needs an Ubertooth\n");
 	H.ut->stop_ubertooth = 1;
 	return LIBUSB_ERROR_NOT_SUPPORTED;
@@ -756,6 +854,18 @@ int ubertooth_hackrf_control(uint8_t request_type, uint8_t request,
 		if (value >= 2402 && value <= 2480) {
 			H.want_scan = 0;
 			scan_stop();
+			/* LE: -A 37 and -A 39 put the window at the band's edge with the
+			 * advertising channel in its outer bin; -A 38 centers it on
+			 * 2425 MHz. An odd center keeps the tuner's +-4 MHz bins, which
+			 * leak suppression mutes, off the LE channels. */
+			if (H.le && value < LE_CENTER_MIN)
+				value = LE_CENTER_MIN;
+			if (H.le && value > LE_CENTER_MAX)
+				value = LE_CENTER_MAX;
+			if (H.le && !(value & 1))
+				value--;
+			if (H.le && H.le_center)
+				value = H.le_center;
 			if (value != H.center) {
 				retune(value);
 				fprintf(stderr, "HackRF: window at %d MHz (channels %d-%d)\n",
@@ -776,8 +886,29 @@ int ubertooth_hackrf_control(uint8_t request_type, uint8_t request,
 		data[1] = (H.center >> 8) & 0xff;
 		return 2;
 	case UBERTOOTH_SET_MOD:
-		if (value != MOD_BT_BASIC_RATE)
+		if (value != MOD_BT_BASIC_RATE && value != MOD_BT_LOW_ENERGY)
 			return refuse_mode();
+		return set_le(value == MOD_BT_LOW_ENERGY);
+	case UBERTOOTH_BTLE_SNIFFING: {
+		/* follow (-f) or not (-n): the window cannot hop. Both capture
+		 * advertising and the connections seen starting, on the window's
+		 * channels. */
+		int lo = H.center - 7 < 2402 ? 2402 : H.center - 7;
+		int hi = H.center + 7 > 2480 ? 2480 : H.center + 7, f;
+		if (set_le(1) != 0)
+			return LIBUSB_ERROR_IO;
+		fprintf(stderr, "HackRF: LE 1M on %d-%d MHz (LE channels", lo, hi);
+		for (f = lo; f <= hi; f++)
+			if (hle_chan_idx(f) >= 0)
+				fprintf(stderr, " %d", hle_chan_idx(f));
+		fprintf(stderr, ")%s\n", value ? "; connections are captured in the window, "
+		        "not followed" : "");
+		return ubertooth_hackrf_stream_start() == 0 ? 0 : LIBUSB_ERROR_IO;
+	}
+	case UBERTOOTH_LE_ADV_CONFIG:
+		/* the firmware's advertising channel options: none apply */
+		return value == 0 ? 0 : LIBUSB_ERROR_NOT_SUPPORTED;
+	case UBERTOOTH_CANCEL_FOLLOW:
 		return 0;
 	/* modes the gateware cannot do */
 	case UBERTOOTH_TX_SYMBOLS:
@@ -786,7 +917,6 @@ int ubertooth_hackrf_control(uint8_t request_type, uint8_t request,
 	case UBERTOOTH_LED_SPECAN:
 	case UBERTOOTH_REPEATER:
 	case UBERTOOTH_RANGE_TEST:
-	case UBERTOOTH_BTLE_SNIFFING:
 	case UBERTOOTH_BTLE_PROMISC:
 	case UBERTOOTH_BTLE_SLAVE:
 	case UBERTOOTH_EGO:

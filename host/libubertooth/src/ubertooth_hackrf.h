@@ -1,9 +1,11 @@
 /*
- * HackRF Pro backend: a virtual Ubertooth for Bluetooth BR.
+ * HackRF Pro backend: a virtual Ubertooth for Bluetooth BR and LE 1M.
  *
  * With the BR channelizer gateware loaded (from hackrf-ubertooth), a HackRF Pro
  * receives 15 BR channels at once and libubertooth delivers them as
  * ordinary BR_PACKET usb_pkt_rx packets, one per channel per 400 symbols.
+ * For ubertooth-btle -n or -f it finds LE 1M packets on the window's even
+ * channels and delivers them as the firmware does in follow mode.
  *
  * A qualifying HackRF Pro (firmware with the RAM gateware loader, and the
  * gateware pack installed) is listed after the Ubertooths: with N
@@ -23,6 +25,14 @@
  *   UBERTOOTH_HACKRF_LEAK     leak suppression margin in 6 dB steps (1-6,
  *                             default 3; 0 turns it off): a channel near the
  *                             strongest one and this far below it is muted
+ *   UBERTOOTH_HACKRF_LE_CENTER     LE window center in MHz, instead of the
+ *                                  advertising channel's placement (unset)
+ *   UBERTOOTH_HACKRF_LE_AA_ERRORS  LE access address bits that may differ,
+ *                                  0-3 (default 2)
+ *   UBERTOOTH_HACKRF_LE_CORRECT    1 corrects one bit error per LE packet
+ *                                  from its CRC, 0 does not (default 1)
+ *   UBERTOOTH_HACKRF_LE_THRESHOLD  1 selects the gateware's slower threshold
+ *                                  in LE mode, 0 keeps BR's (default 1)
  *
  * This file is part of Project Ubertooth (GPL-2.0-or-later).
  */

@@ -58,6 +58,7 @@ if(LIBHACKRF_FOUND)
 	link_directories(${LIBHACKRF_LIBRARY_DIRS})
 	LIST(APPEND LIBUBERTOOTH_LIBS ${LIBHACKRF_LIBRARIES})
 	set(c_sources ${c_sources} ${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_hackrf.c
+		${CMAKE_CURRENT_SOURCE_DIR}/ubertooth_hackrf_le.c
 		CACHE INTERNAL "List of C sources")
 	# the gateware loaded into a selected HackRF Pro: the BR channelizer
 	# image built by hackrf-ubertooth (fpga-build/packs/br_rx.pack), installed
